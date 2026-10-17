@@ -1802,6 +1802,38 @@ void SohMenu::AddMenuVRSettings() {
             "speed readout below. Arrow color previews the swing tiers: green = too slow to "
             "count, yellow = normal hit, red = strong hit."));
 
+    AddWidget(physPath, "Megaton Hammer", WIDGET_SEPARATOR_TEXT);
+    AddWidget(physPath, "Physical Hammer", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysHammer")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("The hammer swings with your arms and has real weight: the head trails your "
+                              "hands and carries through, and it stops dead on walls, floors and bodies. "
+                              "One-handed it is slow and droops; squeeze grip with your other hand on the "
+                              "handle to hold it with both for control and power. Disable for the base game's "
+                              "button swings."));
+    AddWidget(physPath, "Hammer Ground-Pound Reach: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammerPoundReach")
+        .Options(FloatSliderOptions()
+                     .Min(0.0f)
+                     .Max(60.0f)
+                     .DefaultValue(15.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Extra floor-only reach for a downward ground-pound swing. This helps players whose "
+                              "standing arm reach cannot put the hammer on the floor. Zero requires exact physical "
+                              "contact; enemy, wall, and object collision are never extended."));
+    AddWidget(physPath, "Hammer Ground-Pound Speed: %.1f m/s", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammerPoundSpeed")
+        .Options(FloatSliderOptions()
+                     .Min(0.5f)
+                     .Max(8.0f)
+                     .DefaultValue(2.5f)
+                     .Step(0.1f)
+                     .Format("%.1f")
+                     .Tooltip("How fast the head must move downward for a ground pound. This speed is required "
+                              "for both exact floor contact and the optional reach assist."));
+
     const size_t combatCalBegin =
         vrBeginCollapsed(physPath, "Calibration (Dev)##CombatCal", &sVrCombatCalOpen);
     AddWidget(physPath, "Sword Swing Speeds", WIDGET_SEPARATOR_TEXT);
@@ -3043,17 +3075,7 @@ void SohMenu::AddMenuVRSettings() {
                               "Grip closed at that moment = caught into the hand; grip open = it "
                               "vanishes and the pocket shows it again."));
     AddWidget(devPath, "VrBoomerangReadout", WIDGET_CUSTOM).CustomFunction(VrBoomerangReadout).HideInSearch(true);
-    AddWidget(devPath, "Megaton Hammer", WIDGET_SEPARATOR_TEXT);
-    AddWidget(devPath, "Physical Hammer", WIDGET_CVAR_CHECKBOX)
-        .CVar("gVrPhysHammer")
-        .Options(CheckboxOptions()
-                     .DefaultValue(true)
-                     .Tooltip("The hammer swings with your arms and has real weight: the head trails your "
-                              "hands and carries through, and it stops dead on walls, floors and bodies. "
-                              "One-handed it is slow and droops; squeeze grip with your other hand on the "
-                              "handle to hold it with both for control and power. Slam the head into the "
-                              "floor hard enough for the ground pound. Disable for the base game's button "
-                              "swings."));
+    AddWidget(devPath, "Megaton Hammer (Advanced)", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Hammer One-Hand Torque: %.0f", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHammer1HAccel")
         .Options(FloatSliderOptions()
@@ -3163,17 +3185,6 @@ void SohMenu::AddMenuVRSettings() {
                      .Step(0.1f)
                      .Format("%.1f")
                      .Tooltip("Head speed for the heavy blow (the base game's jump-attack hammer damage)."));
-    AddWidget(devPath, "Hammer Ground Pound Speed: %.1f m/s", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHammerPoundSpeed")
-        .Options(FloatSliderOptions()
-                     .Min(0.5f)
-                     .Max(8.0f)
-                     .DefaultValue(2.5f)
-                     .Step(0.1f)
-                     .Format("%.1f")
-                     .Tooltip("How fast the head must be moving INTO a floor for the ground pound "
-                              "(shockwave, quake, and the thump that flips Tektites and stuns scrubs). "
-                              "The same speed into a wall gives the base game's wall strike."));
     AddWidget(devPath, "VrHammerReadout", WIDGET_CUSTOM).CustomFunction(VrHammerReadout).HideInSearch(true);
     AddWidget(devPath, "Carrying", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Physical Carrying", WIDGET_CVAR_CHECKBOX)
