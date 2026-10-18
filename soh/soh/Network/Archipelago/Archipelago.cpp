@@ -1318,7 +1318,7 @@ const std::vector<ArchipelagoClient::ApItem>& ArchipelagoClient::GetScoutedItems
     return scoutedItems;
 }
 
-void ArchipelagoClient::UpdateHintStatus(int player, int location, AP_Hint::HintStatus status) {
+void ArchipelagoClient::UpdateHintStatus(int player, int64_t location, AP_Hint::HintStatus status) {
     if (!IsConnected()) {
         return;
     }
