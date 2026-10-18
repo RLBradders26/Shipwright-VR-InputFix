@@ -1,6 +1,27 @@
-# Important Information For VR
+# Shipwright VR: Archipelago and Steam Frame inputs
 
--Must only use DirectX11, if you're using OpenGL, it won't work.
+This fork combines ShinyWindow's VR port, marclemieux64's VR gameplay/rendering and Archipelago integration, and RLBradders26's VR input-capture and native Steam Frame controller fixes.
+
+## Windows release
+
+Download the Windows x64 ZIP from [GitHub Releases](https://github.com/RLBradders26/Shipwright-VR-InputFix/releases/latest), extract it into its own folder, and run `soh.exe`. Use DirectX 11 with SteamVR/OpenXR for Windows VR.
+
+The package includes the matching `soh.o2r` port assets. Supply your own compatible `oot.o2r` or `oot-mq.o2r` game assets, or follow the included extractor's normal setup. Game ROMs and personal saves/settings are not distributed.
+
+The VR Inputs menu supports independent Steam Frame D-pad directions, right A/B/X/Y, and shoulder buttons. Analog triggers remain reserved in the Item Selector control scheme; use Classic or Ocarina bindings when assigning analog triggers. Newly separated extra buttons start unbound.
+
+Archipelago adds multiworld item sharing across separate game worlds. Its integration is included alongside the normal game and VR features.
+
+## Upstream work and contributions
+
+- [ShinyWindow/Shipwright-VR](https://github.com/ShinyWindow/Shipwright-VR)
+- [VR gameplay and Archipelago branch](https://github.com/marclemieux64/Shipwright-VR-Archipelago/tree/pr/motion-controls-enhancements)
+- [Renderer input-fix contribution](https://github.com/marclemieux64/libultraship-vr/pull/1)
+- [Game input-fix contribution](https://github.com/marclemieux64/Shipwright-VR-Archipelago/pull/1)
+
+The original Ship of Harkinian documentation and attribution follow.
+
+---
 
 ![Ship of Harkinian](docs/shiptitle.darkmode.png#gh-dark-mode-only)
 ![Ship of Harkinian](docs/shiptitle.lightmode.png#gh-light-mode-only)
