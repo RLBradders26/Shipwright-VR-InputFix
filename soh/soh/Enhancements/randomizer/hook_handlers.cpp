@@ -1136,8 +1136,6 @@ void RandomizerOnVanillaBehaviorHandler(GIVanillaBehavior id, bool* should, va_l
     va_list args;
     va_copy(args, originalArgs);
 
-    u8 test;
-
     switch (id) {
         case VB_CLIMB:
             if (RAND_GET_OPTION(RSK_SHUFFLE_CLIMB) && !Flags_GetRandomizerInf(RAND_INF_CAN_CLIMB)) {
