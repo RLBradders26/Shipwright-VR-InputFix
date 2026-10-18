@@ -500,7 +500,7 @@ void EnTorch2_Update(Actor* thisx, PlayState* play2) {
 
             } else if (sJumpslashFlag && (sAlpha == 255) && (this->actor.velocity.y > 0)) {
                 input->cur.button |= BTN_B;
-            } else if (!sJumpslashFlag && (this->actor.bgCheckFlags & 1)) {
+            } else if (!sJumpslashFlag && (this->actor.bgCheckFlags & BGCHECKFLAG_GROUND)) {
                 this->actor.world.rot.y = this->actor.shape.rot.y = this->actor.yawTowardsPlayer;
                 sStickAngle = this->actor.yawTowardsPlayer;
                 if (sAlpha != 255) {
@@ -706,7 +706,7 @@ void EnTorch2_Update(Actor* thisx, PlayState* play2) {
             sStaggerCount = 0;
         }
     }
-    if (player->linearVelocity == -18.0f) {
+    if (GameInteractor_Should(VB_TORCH2_HANDLE_CLANKING, player->linearVelocity == -18.0f, this)) {
         if (this->actor.xzDistToPlayer > 80.0f) {
             player->linearVelocity = 1.2f;
         } else if (this->actor.xzDistToPlayer < 70.0f) {

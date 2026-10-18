@@ -10,6 +10,7 @@ enum GameInteractionEffectQueryResult { Possible = 0x00, TemporarilyNotPossible 
 
 class GameInteractionEffectBase {
   public:
+    virtual ~GameInteractionEffectBase() = default;
     virtual GameInteractionEffectQueryResult CanBeApplied() = 0;
     GameInteractionEffectQueryResult Apply();
 
@@ -156,7 +157,7 @@ class ForceEquipBoots : public RemovableGameInteractionEffect, public Parameteri
     void _Remove() override;
 };
 
-class ModifyRunSpeedModifier : public RemovableGameInteractionEffect, public ParameterizedGameInteractionEffect {
+class ModifyMovementSpeedMultiplier : public RemovableGameInteractionEffect, public ParameterizedGameInteractionEffect {
     GameInteractionEffectQueryResult CanBeApplied() override;
     void _Apply() override;
     void _Remove() override;
@@ -198,11 +199,6 @@ class SetCollisionViewer : public RemovableGameInteractionEffect {
     GameInteractionEffectQueryResult CanBeApplied() override;
     void _Apply() override;
     void _Remove() override;
-};
-
-class SetCosmeticsColor : public GameInteractionEffectBase, public ParameterizedGameInteractionEffect {
-    GameInteractionEffectQueryResult CanBeApplied() override;
-    void _Apply() override;
 };
 
 class RandomizeCosmetics : public GameInteractionEffectBase {

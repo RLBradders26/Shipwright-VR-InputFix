@@ -58,6 +58,11 @@ void EnAttackNiw_Init(Actor* thisx, PlayState* play) {
     this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
     this->actor.shape.rot.y = this->actor.world.rot.y = (Rand_ZeroOne() - 0.5f) * 60000.0f;
     this->actionFunc = func_809B5670;
+
+    if (CVarGetInteger("gCrowdControl", 0) &&
+        CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("SpawnedEnemiesIgnoredIngame"), 0)) {
+        Actor_ChangeCategory(gPlayState, &gPlayState->actorCtx, this, ACTORCAT_NPC);
+    }
 }
 
 void EnAttackNiw_Destroy(Actor* thisx, PlayState* play) {
@@ -209,7 +214,7 @@ void func_809B5670(EnAttackNiw* this, PlayState* play) {
     Actor_SetFocus(&this->actor, this->unk_2E4);
     Actor_GetScreenPos(play, &this->actor, &sp4E, &sp4C);
 
-    if (this->actor.bgCheckFlags & 8) {
+    if (this->actor.bgCheckFlags & BGCHECKFLAG_WALL) {
         this->unk_2D4 = this->actor.yawTowardsPlayer;
         this->unk_2D0 = this->actor.world.rot.x - 3000.0f;
         this->unk_2DC = 0.0f;
@@ -224,7 +229,7 @@ void func_809B5670(EnAttackNiw* this, PlayState* play) {
     } else if (((this->actor.projectedPos.z > 0.0f) && (fabsf(sp34.x - this->actor.world.pos.x) < 50.0f) &&
                 (fabsf(sp34.y - this->actor.world.pos.y) < 50.0f) &&
                 (fabsf(sp34.z - this->actor.world.pos.z) < 50.0f)) ||
-               (this->actor.bgCheckFlags & 1)) {
+               (this->actor.bgCheckFlags & BGCHECKFLAG_GROUND)) {
 
         this->unk_2D4 = this->actor.yawTowardsPlayer;
         this->unk_2D0 = this->actor.world.rot.x - 2000.0f;
@@ -250,7 +255,7 @@ void func_809B59B0(EnAttackNiw* this, PlayState* play) {
         return;
     }
 
-    if (this->actor.bgCheckFlags & 1) {
+    if (this->actor.bgCheckFlags & BGCHECKFLAG_GROUND) {
         if (this->unk_25A == 0) {
             this->unk_25A = 3;
             this->actor.velocity.y = 3.5f;
@@ -272,13 +277,13 @@ void func_809B59B0(EnAttackNiw* this, PlayState* play) {
     Math_ApproachF(&this->unk_2DC, 10000.0f, 1.0f, 1000.0f);
     Math_ApproachF(&this->actor.speedXZ, this->unk_2E0, 0.9f, 1.0f);
     if ((this->actor.gravity == -2.0f) && (this->unk_262 == 0) &&
-        ((this->actor.bgCheckFlags & 8) || (this->unk_25C == 0))) {
+        ((this->actor.bgCheckFlags & BGCHECKFLAG_WALL) || (this->unk_25C == 0))) {
         this->unk_2E0 = 0.0f;
         this->actor.gravity = 0.0f;
         this->unk_2DC = 0.0f;
         this->unk_2D0 = this->actor.world.rot.x - 5000.0f;
         this->actionFunc = func_809B5C18;
-    } else if (this->actor.bgCheckFlags & 1) {
+    } else if (this->actor.bgCheckFlags & BGCHECKFLAG_GROUND) {
         func_809B5268(this, play, 5);
     } else {
         func_809B5268(this, play, 2);
@@ -361,7 +366,7 @@ void EnAttackNiw_Update(Actor* thisx, PlayState* play) {
         cucco = (EnNiw*)this->actor.parent;
         if ((this->actor.parent->update != NULL) && (this->actor.parent != NULL) && (cucco != NULL) &&
             (cucco->timer9 == 0) && (player->invincibilityTimer == 0)) {
-            func_8002F6D4(play, &this->actor, 2.0f, this->actor.world.rot.y, 0.0f, 0x10);
+            Actor_SetPlayerKnockbackLarge(play, &this->actor, 2.0f, this->actor.world.rot.y, 0.0f, 0x10);
             cucco->timer9 = 0x46;
         }
     }

@@ -1,5 +1,8 @@
 #include "z_arms_hook.h"
 #include "objects/object_link_boy/object_link_boy.h"
+#include "soh/Enhancements/game-interactor/GameInteractor.h"
+#include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h" // SOH [VR]
 
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
@@ -95,7 +98,7 @@ void ArmsHook_Wait(ArmsHook* this, PlayState* play) {
     }
 }
 
-void func_80865044(ArmsHook* this) {
+void ArmsHook_PullPlayer(ArmsHook* this) {
     this->actor.child = this->actor.parent;
     this->actor.parent->parent = &this->actor;
 }
@@ -167,7 +170,7 @@ void ArmsHook_Shoot(ArmsHook* this, PlayState* play) {
         return;
     }
 
-    func_8002F8F0(&player->actor, NA_SE_IT_HOOKSHOT_CHAIN - SFX_FLAG);
+    Actor_PlaySfx_Flagged2(&player->actor, NA_SE_IT_HOOKSHOT_CHAIN - SFX_FLAG);
     ArmsHook_CheckForCancel(this);
 
     if ((this->timer != 0) && (this->collider.base.atFlags & AT_HIT) &&
@@ -178,7 +181,7 @@ void ArmsHook_Shoot(ArmsHook* this, PlayState* play) {
             if (this->collider.info.atHitInfo->bumperFlags & BUMP_HOOKABLE) {
                 ArmsHook_AttachHookToActor(this, touchedActor);
                 if (CHECK_FLAG_ALL(touchedActor->flags, ACTOR_FLAG_HOOKSHOT_PULLS_PLAYER)) {
-                    func_80865044(this);
+                    ArmsHook_PullPlayer(this);
                 }
             }
         }
@@ -279,7 +282,7 @@ void ArmsHook_Shoot(ArmsHook* this, PlayState* play) {
                         ArmsHook_AttachHookToActor(this, &dynaPolyActor->actor);
                     }
                 }
-                func_80865044(this);
+                ArmsHook_PullPlayer(this);
                 Audio_PlaySoundGeneral(NA_SE_IT_HOOKSHOT_STICK_OBJ, &this->actor.projectedPos, 4,
                                        &gSfxDefaultFreqAndVolScale, &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
             } else {
@@ -330,8 +333,21 @@ void ArmsHook_Draw(Actor* thisx, PlayState* play) {
             CVarGetInteger(CVAR_ENHANCEMENT("ScaleAdultEquipmentAsChild"), 0) && LINK_IS_CHILD) {
             Matrix_Scale(0.8, 0.8, 0.8, MTXMODE_APPLY);
         }
-        gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
-        gSPDisplayList(POLY_OPA_DISP++, gLinkAdultHookshotTipDL);
+        // SOH [VR] While idle in the hand, the hook (and below, its chain stub) is welded to the
+        // live controller pose instead of trailing the hookshot at the 20 Hz tick (no-op otherwise).
+        // SOH [VR] Real-life hand scale: the idle hook is sized with the hookshot, about its seat
+        // in the barrel (the actor origin); the chain stub below only in thickness.
+        s32 vrHookWelded = VrHookshot_IdleWelded(&this->actor);
+        f32 vrHookS = vrHookWelded ? VrHand_ScaleFactor() : 1.0f;
+        if (vrHookWelded) {
+            Matrix_Scale(vrHookS, vrHookS, vrHookS, MTXMODE_APPLY);
+        }
+        Mtx* vrTipMtx = MATRIX_NEWMTX(play->state.gfxCtx);
+        VrHookshot_WeldIdleHook(&this->actor, vrTipMtx);
+        gSPMatrix(POLY_OPA_DISP++, vrTipMtx, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+        if (GameInteractor_Should(VB_DRAW_HOOKSHOT_TIP, true, player, play)) {
+            gSPDisplayList(POLY_OPA_DISP++, gLinkAdultHookshotTipDL);
+        }
         Matrix_Translate(this->actor.world.pos.x, this->actor.world.pos.y, this->actor.world.pos.z, MTXMODE_NEW);
         Math_Vec3f_Diff(&player->unk_3C8, &this->actor.world.pos, &sp78);
         sp58 = SQ(sp78.x) + SQ(sp78.z);
@@ -344,8 +360,15 @@ void ArmsHook_Draw(Actor* thisx, PlayState* play) {
         } else {
             Matrix_Scale(0.015f, 0.015f, sqrtf(SQ(sp78.y) + sp58) * 0.01f, MTXMODE_APPLY);
         }
-        gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
-        gSPDisplayList(POLY_OPA_DISP++, gLinkAdultHookshotChainDL);
+        if (vrHookWelded) {
+            Matrix_Scale(vrHookS, vrHookS, 1.0f, MTXMODE_APPLY); // SOH [VR]
+        }
+        Mtx* vrChainMtx = MATRIX_NEWMTX(play->state.gfxCtx);
+        VrHookshot_WeldIdleHook(&this->actor, vrChainMtx); // SOH [VR]
+        gSPMatrix(POLY_OPA_DISP++, vrChainMtx, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+        if (GameInteractor_Should(VB_DRAW_HOOKSHOT_CHAIN, true, player, play)) {
+            gSPDisplayList(POLY_OPA_DISP++, gLinkAdultHookshotChainDL);
+        }
 
         CLOSE_DISPS(play->state.gfxCtx);
     }

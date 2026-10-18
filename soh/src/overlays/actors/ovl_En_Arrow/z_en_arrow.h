@@ -23,6 +23,17 @@ typedef struct EnArrow {
     /* 0x024C */ Actor* hitActor;
     /* 0x0250 */ Vec3f unk_250;
     /* 0x025C */ EnArrowActionFunc actionFunc;
+    // SOH [VR] Resource commitment and launch data travel with the actor, including savestates.
+    s16 vrDeferredMagicCost;
+    u8 vrPhysicalThrow;
+    Vec3f vrLaunchVelocity;
+    // Physical-bow release data belongs to this arrow, not to the player's later animation
+    // state. Horseback can keep a released arrow parented for several updates before launch.
+    u8 vrPhysicalBowShot;
+    u8 vrHorseBowShot;
+    f32 vrBowPower;
+    Vec3f vrBowAimOrigin;
+    Vec3f vrBowAimDir;
 } EnArrow; // size = 0x0260
 
 typedef enum {

@@ -1,14 +1,12 @@
 #pragma once
+
 #include <nlohmann/json.hpp>
 #include "randomizerTypes.h"
-#include "randomizer_check_objects.h"
 #include "soh/SohGui/UIWidgets.hpp"
-
-#include <libultraship/libultraship.h>
 
 namespace CheckTracker {
 
-class CheckTrackerSettingsWindow : public Ship::GuiWindow {
+class CheckTrackerSettingsWindow final : public Ship::GuiWindow {
   public:
     using GuiWindow::GuiWindow;
     ~CheckTrackerSettingsWindow(){};
@@ -19,7 +17,7 @@ class CheckTrackerSettingsWindow : public Ship::GuiWindow {
     void UpdateElement() override{};
 };
 
-class CheckTrackerWindow : public Ship::GuiWindow {
+class CheckTrackerWindow final : public Ship::GuiWindow {
   public:
     using GuiWindow::GuiWindow;
     void Draw() override;
@@ -61,5 +59,7 @@ void UpdateAllOrdering();
 void UpdateAllAreas();
 void RecalculateAllAreaTotals();
 void SpoilAreaFromCheck(RandomizerCheck rc);
-void RecalculateAvailableChecks();
+void RecalculateAvailableChecks(RandomizerRegion startingRegion = RR_ROOT, RandoAgeTime startingAgeTime = RAT_NONE);
+void LoadFromPreset(const nlohmann::json& info);
+int GetStartingShopItem(uint32_t sceneId);
 } // namespace CheckTracker

@@ -1,13 +1,13 @@
 #pragma once
-#include "stdint.h"
 
 #ifdef __cplusplus
 
-#include <libultraship/libultraship.h>
-#include <imgui.h>
+#include <libultraship/libultra/types.h>
+#include <ship/window/gui/GuiWindow.h>
+
 #include "AudioCollection.h"
 
-class AudioEditor : public Ship::GuiWindow {
+class AudioEditor final : public Ship::GuiWindow {
   public:
     using GuiWindow::GuiWindow;
 
@@ -18,6 +18,7 @@ class AudioEditor : public Ship::GuiWindow {
 };
 
 void AudioEditor_RandomizeAll();
+void AudioEditor_AutoRandomizeAll();
 void AudioEditor_RandomizeGroup(SeqType group);
 void AudioEditor_ResetAll();
 void AudioEditor_ResetGroup(SeqType group);

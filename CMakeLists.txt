@@ -2,12 +2,16 @@ cmake_minimum_required(VERSION 3.26.0 FATAL_ERROR)
 
 set(CMAKE_SYSTEM_VERSION 10.0 CACHE STRING "" FORCE)
 set(CMAKE_CXX_STANDARD 20 CACHE STRING "The C++ standard to use")
+set(CMAKE_C_STANDARD 23 CACHE STRING "The C standard to use")
 
 set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum OS X deployment version")
 
-project(Ship VERSION 9.0.0 LANGUAGES C CXX)
+project(Ship VERSION 9.2.3 LANGUAGES C CXX)
 include(CMake/soh-cvars.cmake)
 include(CMake/lus-cvars.cmake)
+set(SPDLOG_LEVEL_TRACE 0)
+set(SPDLOG_LEVEL_OFF 6)
+set(SPDLOG_MIN_CUTOFF SPDLOG_LEVEL_TRACE CACHE STRING "cutoff at trace")
 
 option(SUPPRESS_WARNINGS "Suppress warnings in LUS and src (decomp)" ON)
 if(SUPPRESS_WARNINGS)
@@ -34,7 +38,7 @@ math(EXPR PATCH_INDEX "${PROJECT_VERSION_PATCH}")
 # Use the patch number to select the correct word
 list(GET NATO_PHONETIC_ALPHABET ${PATCH_INDEX} PROJECT_PATCH_WORD)
 
-set(PROJECT_BUILD_NAME "Blair ${PROJECT_PATCH_WORD}" CACHE STRING "" FORCE)
+set(PROJECT_BUILD_NAME "Ackbar ${PROJECT_PATCH_WORD}" CACHE STRING "" FORCE)
 set(PROJECT_TEAM "github.com/harbourmasters" CACHE STRING "" FORCE)
 
 execute_process(
@@ -74,16 +78,30 @@ set(CMAKE_PROJECT_GIT_COMMIT_TAG "${GIT_COMMIT_TAG}" CACHE STRING "Git commit ta
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT soh)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/MP>)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/Zc:preprocessor>)
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    if(NOT CMAKE_VS_PLATFORM_NAME)
+        set(CMAKE_VS_PLATFORM_NAME "x64")
+    endif()
+
+    if("${CMAKE_VS_PLATFORM_NAME}" MATCHES "^[Aa][Rr][Mm]64$")
+        set(SOH_WINDOWS_ARM64 TRUE)
+    else()
+        set(SOH_WINDOWS_ARM64 FALSE)
+    endif()
+
     include(CMake/automate-vcpkg.cmake)
 
     set(VCPKG_TRIPLET x64-windows-static)
     set(VCPKG_TARGET_TRIPLET x64-windows-static)
+    if(SOH_WINDOWS_ARM64)
+        set(VCPKG_TRIPLET arm64-windows-static)
+        set(VCPKG_TARGET_TRIPLET arm64-windows-static)
+    endif()
 
     vcpkg_bootstrap()
-    vcpkg_install_packages(zlib bzip2 libzip libpng sdl2 sdl2-net glew glfw3 nlohmann-json tinyxml2 spdlog glm)
-
+    vcpkg_install_packages(zlib bzip2 libzip libpng sdl2 sdl2-net glew glfw3 nlohmann-json tinyxml2 spdlog libogg libvorbis opus opusfile openssl valijson openxr-loader glm)
     if (CMAKE_C_COMPILER_LAUNCHER MATCHES "ccache|sccache")
         set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded)
     endif()
@@ -99,7 +117,8 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
     message("${CMAKE_VS_PLATFORM_NAME} architecture in use")
 
     if(NOT ("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64"
-        OR "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32"))
+        OR "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32"
+        OR SOH_WINDOWS_ARM64))
         message(FATAL_ERROR "${CMAKE_VS_PLATFORM_NAME} arch is not supported!")
     endif()
 endif()
@@ -108,15 +127,23 @@ endif()
 # Global configuration types
 ################################################################################
 if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
-set(CMAKE_C_FLAGS_DEBUG "-g -ffast-math -DDEBUG")
-set(CMAKE_CXX_FLAGS_DEBUG "-g -ffast-math -DDEBUG")
-set(CMAKE_C_FLAGS_RELEASE "-O3 -ffast-math -DNDEBUG")
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -ffast-math -DNDEBUG")
+set(CMAKE_C_FLAGS_DEBUG "-g -DDEBUG")
+set(CMAKE_CXX_FLAGS_DEBUG "-g -DDEBUG")
+set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 else()
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_OBJCXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 endif()
+
+# Enforce strict, deterministic IEEE-754 floating-point to match N64 (MIPS) semantics.
+# Never enable fast-math, and disable FMA contraction: the R4300 CPU and RSP have no
+# fused multiply-add, so contracting mul+add into an FMA produces extra precision.
+add_compile_options($<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-fno-fast-math>)
+add_compile_options($<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>)
+add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/fp:precise>)
+add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/fp:except->)
 
 if(NOT CMAKE_BUILD_TYPE )
     set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose the type of build." FORCE)
@@ -153,6 +180,10 @@ set(GFX_DEBUG_DISASSEMBLER ON)
 
 # Tell LUS we're using F3DEX_GBI_2 (in a way that doesn't break libgfxd)
 set(GBI_UCODE F3DEX_GBI_2)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake")
+
+# Enable MPQ and OTR support
+set(INCLUDE_MPQ_SUPPORT ON)
 
 ################################################################################
 # Set CONTROLLERBUTTONS_T
@@ -162,10 +193,43 @@ add_compile_definitions(CONTROLLERBUTTONS_T=uint32_t)
 ################################################################################
 # Sub-projects
 ################################################################################
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    # SOH [VR] The NDK has no libpng; ZAPD (the on-device ROM extractor) needs it.
+    include(FetchContent)
+    set(PNG_SHARED OFF CACHE BOOL "" FORCE)
+    set(PNG_STATIC ON CACHE BOOL "" FORCE)
+    set(PNG_TESTS OFF CACHE BOOL "" FORCE)
+    set(PNG_TOOLS OFF CACHE BOOL "" FORCE)
+    set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        libpng
+        GIT_REPOSITORY https://github.com/pnggroup/libpng.git
+        GIT_TAG v1.6.43
+    )
+    FetchContent_MakeAvailable(libpng)
+    # ZAPD does find_package(PNG REQUIRED) and links PNG::PNG.
+    add_library(PNG::PNG ALIAS png_static)
+    set(PNG_FOUND TRUE)
+    set(PNG_INCLUDE_DIRS ${libpng_SOURCE_DIR} ${libpng_BINARY_DIR})
+    set(PNG_PNG_INCLUDE_DIR ${libpng_SOURCE_DIR} CACHE PATH "" FORCE)
+    set(PNG_LIBRARY png_static CACHE STRING "" FORCE)
+endif()
+
 add_subdirectory(libultraship ${CMAKE_BINARY_DIR}/libultraship)
 target_compile_options(libultraship PRIVATE "${WARNING_OVERRIDE}")
+target_compile_definitions(libultraship PUBLIC INCLUDE_MPQ_SUPPORT)
 add_subdirectory(ZAPDTR/ZAPD ${CMAKE_BINARY_DIR}/ZAPD)
 add_subdirectory(OTRExporter)
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    # SOH [VR] What the desktop extractor gets from vcpkg's global include path, given to the
+    # upstream submodules' targets from here instead of patching them.
+    target_include_directories(png_static INTERFACE ${libpng_SOURCE_DIR} ${libpng_BINARY_DIR})
+    target_link_libraries(OTRExporter PUBLIC tinyxml2::tinyxml2 libzip::zip)
+    # ZAPD's crash handler calls backtrace(), which bionic only has from API 33.
+    target_sources(ZAPDLib PRIVATE ${CMAKE_SOURCE_DIR}/soh/platform/android/execinfo_compat.c)
+    target_compile_options(ZAPDLib PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-include${CMAKE_SOURCE_DIR}/soh/platform/android/execinfo_compat.h>)
+endif()
 add_subdirectory(soh)
 
 set_property(TARGET soh PROPERTY APPIMAGE_DESKTOP_FILE_TERMINAL YES)
@@ -173,24 +237,15 @@ set_property(TARGET soh PROPERTY APPIMAGE_DESKTOP_FILE "${CMAKE_SOURCE_DIR}/scri
 set_property(TARGET soh PROPERTY APPIMAGE_ICON_FILE "${CMAKE_BINARY_DIR}/sohIcon.png")
 
 if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
-install(PROGRAMS "${CMAKE_BINARY_DIR}/linux/soh.sh" DESTINATION . COMPONENT appimage)
-install(FILES "${CMAKE_BINARY_DIR}/soh/soh.otr" DESTINATION . COMPONENT ship)
+install(FILES "${CMAKE_BINARY_DIR}/soh/soh.o2r" DESTINATION . COMPONENT ship)
 install(TARGETS ZAPD DESTINATION ./assets/extractor COMPONENT extractor)
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/extractor/" DESTINATION ./assets/extractor COMPONENT extractor)
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/xml/" DESTINATION ./assets/extractor/xmls COMPONENT extractor)
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/OTRExporter/CFG/filelists/" DESTINATION ./assets/extractor/filelists COMPONENT extractor)
-install(FILES "${CMAKE_SOURCE_DIR}/OTRExporter/CFG/ActorList_OoTMqDbg.txt" DESTINATION ./assets/extractor/symbols COMPONENT extractor)
-install(FILES "${CMAKE_SOURCE_DIR}/OTRExporter/CFG/ObjectList_OoTMqDbg.txt" DESTINATION ./assets/extractor/symbols COMPONENT extractor)
-install(FILES "${CMAKE_SOURCE_DIR}/OTRExporter/CFG/SymbolMap_OoTMqDbg.txt" DESTINATION ./assets/extractor/symbols COMPONENT extractor)
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/extractor/" DESTINATION ./assets COMPONENT extractor)
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/xml/" DESTINATION ./assets/xml COMPONENT extractor)
 endif()
 
 if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Windows")
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/extractor/" DESTINATION ./assets/extractor COMPONENT ship)
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/xml/" DESTINATION ./assets/extractor/xmls COMPONENT ship)
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/OTRExporter/CFG/filelists/" DESTINATION ./assets/extractor/filelists COMPONENT ship)
-install(FILES "${CMAKE_SOURCE_DIR}/OTRExporter/CFG/ActorList_OoTMqDbg.txt" DESTINATION ./assets/extractor/symbols COMPONENT ship)
-install(FILES "${CMAKE_SOURCE_DIR}/OTRExporter/CFG/ObjectList_OoTMqDbg.txt" DESTINATION ./assets/extractor/symbols COMPONENT ship)
-install(FILES "${CMAKE_SOURCE_DIR}/OTRExporter/CFG/SymbolMap_OoTMqDbg.txt" DESTINATION ./assets/extractor/symbols COMPONENT ship)
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/extractor/" DESTINATION ./assets/ COMPONENT ship)
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/xml/" DESTINATION ./assets/xml COMPONENT ship)
 endif()
 
 find_package(Python3 COMPONENTS Interpreter)
@@ -198,42 +253,42 @@ find_package(Python3 COMPONENTS Interpreter)
 # Target to generate OTRs
 add_custom_target(
     ExtractAssets
-    COMMAND ${CMAKE_COMMAND} -E rm -f oot.otr oot-mq.otr soh.otr
+    COMMAND ${CMAKE_COMMAND} -E rm -f oot.o2r oot-mq.o2r soh.o2r
 
     # copy LUS default shaders into assets/custom
     COMMAND ${CMAKE_COMMAND} -E rm -r -f ${CMAKE_CURRENT_SOURCE_DIR}/soh/assets/custom/shaders/
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/libultraship/src/graphic/Fast3D/shaders/ ${CMAKE_CURRENT_SOURCE_DIR}/soh/assets/custom/shaders/
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/libultraship/src/fast/shaders/ ${CMAKE_CURRENT_SOURCE_DIR}/soh/assets/custom/shaders/
 
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/OTRExporter/extract_assets.py -z "$<TARGET_FILE:ZAPD>" --non-interactive --xml-root ../soh/assets/xml --custom-otr-file soh.otr "--custom-assets-path" ${CMAKE_CURRENT_SOURCE_DIR}/soh/assets/custom --port-ver "${CMAKE_PROJECT_VERSION}"
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/OTRExporter/extract_assets.py -z "$<TARGET_FILE:ZAPD>" --non-interactive --xml-root assets/xml --custom-otr-file soh.o2r "--custom-assets-path" ${CMAKE_CURRENT_SOURCE_DIR}/soh/assets/custom --port-ver "${CMAKE_PROJECT_VERSION}"
     COMMAND ${CMAKE_COMMAND} -DSYSTEM_NAME=${CMAKE_SYSTEM_NAME} -DTARGET_DIR="$<TARGET_FILE_DIR:ZAPD>" -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR} -DBINARY_DIR=${CMAKE_BINARY_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/copy-existing-otrs.cmake
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/OTRExporter
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/soh
     COMMENT "Running asset extraction..."
     DEPENDS ZAPD
-    BYPRODUCTS oot.otr ${CMAKE_SOURCE_DIR}/oot.otr oot-mq.otr ${CMAKE_SOURCE_DIR}/oot-mq.otr ${CMAKE_SOURCE_DIR}/soh.otr
+    BYPRODUCTS oot.o2r ${CMAKE_SOURCE_DIR}/oot.o2r oot-mq.o2r ${CMAKE_SOURCE_DIR}/oot-mq.o2r ${CMAKE_SOURCE_DIR}/soh.o2r
 )
 
 # Target to generate headers
 add_custom_target(
     ExtractAssetHeaders
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/OTRExporter/extract_assets.py -z "$<TARGET_FILE:ZAPD>" --non-interactive --xml-root ../soh/assets/xml --gen-headers
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/OTRExporter
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/OTRExporter/extract_assets.py -z "$<TARGET_FILE:ZAPD>" --non-interactive --xml-root assets/xml --gen-headers
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/soh
     COMMENT "Generating asset headers..."
     DEPENDS ZAPD
 )
 
-# Target to generate only soh.otr
+# Target to generate only soh.o2r
 add_custom_target(
     GenerateSohOtr
-    COMMAND ${CMAKE_COMMAND} -E rm -f soh.otr
+    COMMAND ${CMAKE_COMMAND} -E rm -f soh.o2r
 
     # copy LUS default shaders into assets/custom
     COMMAND ${CMAKE_COMMAND} -E rm -r -f ${CMAKE_CURRENT_SOURCE_DIR}/soh/assets/custom/shaders/
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/libultraship/src/graphic/Fast3D/shaders/ ${CMAKE_CURRENT_SOURCE_DIR}/soh/assets/custom/shaders/
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/libultraship/src/fast/shaders/ ${CMAKE_CURRENT_SOURCE_DIR}/soh/assets/custom/shaders/
 
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/OTRExporter/extract_assets.py -z "$<TARGET_FILE:ZAPD>" --norom --custom-otr-file soh.otr "--custom-assets-path" ${CMAKE_CURRENT_SOURCE_DIR}/soh/assets/custom --port-ver "${CMAKE_PROJECT_VERSION}"
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/OTRExporter/extract_assets.py -z "$<TARGET_FILE:ZAPD>" --norom --custom-otr-file soh.o2r "--custom-assets-path" ${CMAKE_CURRENT_SOURCE_DIR}/soh/assets/custom --port-ver "${CMAKE_PROJECT_VERSION}"
     COMMAND ${CMAKE_COMMAND} -DSYSTEM_NAME=${CMAKE_SYSTEM_NAME} -DTARGET_DIR="$<TARGET_FILE_DIR:ZAPD>" -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR} -DBINARY_DIR=${CMAKE_BINARY_DIR} -DONLYSOHOTR=On -P ${CMAKE_CURRENT_SOURCE_DIR}/copy-existing-otrs.cmake
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/OTRExporter
-    COMMENT "Generating soh.otr..."
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/soh
+    COMMENT "Generating soh.o2r..."
     DEPENDS ZAPD
 )
 
@@ -266,22 +321,12 @@ add_custom_target(CreateOSXIcons
     )
 add_dependencies(soh CreateOSXIcons)
 
-install(TARGETS ZAPD DESTINATION ${CMAKE_BINARY_DIR}/assets/extractor)
+install(TARGETS ZAPD DESTINATION ${CMAKE_BINARY_DIR}/assets)
 
 set(PROGRAM_PERMISSIONS_EXECUTE OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ)
 
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/extractor/" DESTINATION ./assets/extractor)
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/xml/" DESTINATION ./assets/extractor/xmls)
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/OTRExporter/CFG/filelists/" DESTINATION ./assets/extractor/filelists)
-install(FILES "${CMAKE_SOURCE_DIR}/OTRExporter/CFG/ActorList_OoTMqDbg.txt" DESTINATION ./assets/extractor/symbols)
-install(FILES "${CMAKE_SOURCE_DIR}/OTRExporter/CFG/ObjectList_OoTMqDbg.txt" DESTINATION ./assets/extractor/symbols)
-install(FILES "${CMAKE_SOURCE_DIR}/OTRExporter/CFG/SymbolMap_OoTMqDbg.txt" DESTINATION ./assets/extractor/symbols)
-
-install(DIRECTORY ${CMAKE_BINARY_DIR}/assets
-        DESTINATION .
-        PATTERN ZAPD.out
-        PERMISSIONS ${PROGRAM_PERMISSIONS_EXECUTE}
-        )
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/extractor/" DESTINATION ./assets/)
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/xml/" DESTINATION ./assets/xml)
 
 # Rename the installed soh binary to drop the macos suffix
 INSTALL(CODE "FILE(RENAME \${CMAKE_INSTALL_PREFIX}/../MacOS/soh-macos \${CMAKE_INSTALL_PREFIX}/../MacOS/soh)")

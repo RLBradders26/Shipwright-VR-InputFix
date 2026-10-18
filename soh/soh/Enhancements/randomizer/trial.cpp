@@ -71,17 +71,23 @@ size_t Trials::GetTrialListSize() const {
     return mTrials.size();
 }
 
-void Trials::ParseJson(nlohmann::json spoilerFileJson) {
-    nlohmann::json trialsJson = spoilerFileJson["requiredTrials"];
+void Trials::ParseJson(const nlohmann::json& spoilerFileJson) {
+    nlohmann::json trialsJson = spoilerFileJson.value("requiredTrials", nlohmann::json());
 
     for (auto& trial : mTrials) {
         trial.SetAsSkipped();
 
-        for (auto nameInLang : trial.GetName().GetAllMessages()) {
+        for (auto nameInLang : trial.GetName().GetAllMessages(MF_CLEAN)) {
             if (std::find(trialsJson.begin(), trialsJson.end(), nameInLang) != trialsJson.end()) {
                 trial.SetAsRequired();
             }
         }
+    }
+}
+
+void Trials::RemoveAllTrials() {
+    for (auto& trial : mTrials) {
+        trial.SetAsSkipped();
     }
 }
 

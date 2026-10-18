@@ -1,6 +1,8 @@
 #include "global.h"
 
 #include "soh/frame_interpolation.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
+#include "soh/Enhancements/savestate_serialize.h"
 #include <assert.h>
 
 // clang-format off
@@ -19,8 +21,13 @@ MtxF gMtxFClear = {
 };
 // clang-format on
 
-MtxF* sMatrixStack;   // "Matrix_stack"
-MtxF* sCurrentMatrix; // "Matrix_now"
+static MtxF* sMatrixStack;   // "Matrix_stack"
+static MtxF* sCurrentMatrix; // "Matrix_now"
+
+void Matrix_SaveState(SaveStateCtx* ctx) {
+    SaveState_Blob(ctx, sMatrixStack, sizeof(MtxF) * 20);
+    SaveState_Blob(ctx, sCurrentMatrix, sizeof(MtxF));
+}
 
 void Matrix_Init(GameState* gameState) {
     sCurrentMatrix = GAMESTATE_ALLOC_MC(gameState, 20 * sizeof(MtxF));
@@ -556,6 +563,11 @@ Mtx* Matrix_MtxFToMtx(MtxF* src, Mtx* dest) {
 Mtx* Matrix_ToMtx(Mtx* dest, char* file, s32 line) {
     FrameInterpolation_RecordMatrixToMtx(dest, file, line);
     guMtxF2L(Matrix_CheckFloats(sCurrentMatrix, file, line), dest);
+    // SOH [VR] Physical carrying: while a held object draws, each matrix it emits is welded to the
+    // live hand (headset rate) instead of riding the 20 Hz pose.
+    if (gVrMtxWeldHand >= 0) {
+        Player_VrWeldCurrentMtx(dest, &sCurrentMatrix->mf[0][0]);
+    }
     return dest;
     // return Matrix_MtxFToMtx(MATRIX_CHECKFLOATS(sCurrentMatrix), dest);
 }

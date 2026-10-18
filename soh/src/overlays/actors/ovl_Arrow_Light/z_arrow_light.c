@@ -7,6 +7,7 @@
 #include "z_arrow_light.h"
 
 #include "overlays/actors/ovl_En_Arrow/z_en_arrow.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_UPDATE_DURING_OCARINA)
 
@@ -75,7 +76,7 @@ void ArrowLight_Charge(ArrowLight* this, PlayState* play) {
     this->actor.world.pos = arrow->actor.world.pos;
     this->actor.shape.rot = arrow->actor.shape.rot;
 
-    func_8002F974(&this->actor, NA_SE_PL_ARROW_CHARGE_LIGHT - SFX_FLAG);
+    Actor_PlaySfx_Flagged(&this->actor, NA_SE_PL_ARROW_CHARGE_LIGHT - SFX_FLAG);
 
     // if arrow has no parent, player has fired the arrow
     if (arrow->actor.parent == NULL) {
@@ -212,6 +213,12 @@ void ArrowLight_Draw(Actor* thisx, PlayState* play) {
         Matrix_RotateX(tranform->shape.rot.x * (M_PI / 0x8000), MTXMODE_APPLY);
         Matrix_RotateZ(tranform->shape.rot.z * (M_PI / 0x8000), MTXMODE_APPLY);
         Matrix_Scale(0.01f, 0.01f, 0.01f, MTXMODE_APPLY);
+        if (VrArchery_NockedArrowHandForActor(&arrow->actor) >= 0) {
+            f32 vrScale = VrHand_ScaleFactor();
+            Matrix_Translate(-1.0f, 0.0f, -1003.0f, MTXMODE_APPLY);
+            Matrix_Scale(vrScale, vrScale, vrScale, MTXMODE_APPLY);
+            Matrix_Translate(1.0f, 0.0f, 1003.0f, MTXMODE_APPLY);
+        }
 
         // Draw yellow effect over the screen when arrow hits
         if (this->unk_164 > 0) {
@@ -236,11 +243,15 @@ void ArrowLight_Draw(Actor* thisx, PlayState* play) {
         }
         Matrix_Scale(this->radius * 0.2f, this->unk_160 * 4.0f, this->radius * 0.2f, MTXMODE_APPLY);
         Matrix_Translate(0.0f, -700.0f, 0.0f, MTXMODE_APPLY);
+        s32 vrWeldHand = VrArchery_NockedArrowHandForActor(&arrow->actor);
+        s32 previousWeldHand = gVrMtxWeldHand;
+        gVrMtxWeldHand = vrWeldHand;
         gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+        gVrMtxWeldHand = previousWeldHand;
         gSPDisplayList(POLY_XLU_DISP++, sMaterialDL);
-        gSPDisplayList(POLY_XLU_DISP++,
-                       Gfx_TwoTexScroll(play->state.gfxCtx, 0, 511 - (stateFrames * 5) % 512, 0, 4, 32, 1,
-                                        511 - (stateFrames * 10) % 512, 511 - (stateFrames * 30) % 512, 8, 16));
+        gSPDisplayList(POLY_XLU_DISP++, Gfx_TwoTexScrollEx(play->state.gfxCtx, 0, 511 - (stateFrames * 5) % 512, 0, 4,
+                                                           32, 1, 511 - (stateFrames * 10) % 512,
+                                                           511 - (stateFrames * 30) % 512, 8, 16, -5, 0, -10, -30));
         gSPDisplayList(POLY_XLU_DISP++, sModelDL);
 
         CLOSE_DISPS(play->state.gfxCtx);

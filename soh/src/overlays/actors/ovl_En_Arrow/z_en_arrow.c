@@ -8,6 +8,9 @@
 #include "objects/gameplay_keep/gameplay_keep.h"
 #include "objects/object_gi_nuts/object_gi_nuts.h"
 
+#include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h" // SOH [VR]
+
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
 void EnArrow_Init(Actor* thisx, PlayState* play);
@@ -83,6 +86,14 @@ void EnArrow_Init(Actor* thisx, PlayState* play) {
         0x00002000, 0x00010000, 0x00004000, 0x00008000, 0x00000004,
     };
     EnArrow* this = (EnArrow*)thisx;
+    this->vrDeferredMagicCost = 0;
+    this->vrPhysicalThrow = false;
+    this->vrLaunchVelocity = (Vec3f){ 0.0f, 0.0f, 0.0f };
+    this->vrPhysicalBowShot = false;
+    this->vrHorseBowShot = false;
+    this->vrBowPower = 0.0f;
+    this->vrBowAimOrigin = (Vec3f){ 0.0f, 0.0f, 0.0f };
+    this->vrBowAimDir = (Vec3f){ 0.0f, 0.0f, 0.0f };
 
     if (CVarGetInteger(CVAR_COSMETIC("Arrows.NormalPrimary.Changed"), 0)) {
         blureNormal.altEnvColor =
@@ -213,6 +224,32 @@ void EnArrow_Shoot(EnArrow* this, PlayState* play) {
             return;
         }
 
+        // SOH [VR] Mounted Link's draw path can rewrite the held horse arrow after the player
+        // limb callback applied physical aim. At detachment, restore the same latched two-hand
+        // line used by the aim dot before Actor_SetProjectileSpeed turns rotation into velocity.
+        // Outside a physical release AimSegment is false, leaving every vanilla shot untouched.
+        {
+            float vrAim[6];
+            if (this->vrPhysicalBowShot) {
+                vrAim[0] = this->vrBowAimOrigin.x;
+                vrAim[1] = this->vrBowAimOrigin.y;
+                vrAim[2] = this->vrBowAimOrigin.z;
+                vrAim[3] = this->vrBowAimDir.x;
+                vrAim[4] = this->vrBowAimDir.y;
+                vrAim[5] = this->vrBowAimDir.z;
+            }
+            if (this->vrPhysicalBowShot || VrArchery_TakeReleasedAim(vrAim)) {
+                Vec3f origin = { vrAim[0], vrAim[1], vrAim[2] };
+                Vec3f target = { origin.x + vrAim[3] * 100.0f, origin.y + vrAim[4] * 100.0f,
+                                 origin.z + vrAim[5] * 100.0f };
+                this->actor.world.pos = origin;
+                this->actor.world.rot.x = Math_Vec3f_Pitch(&origin, &target);
+                this->actor.world.rot.y = Math_Vec3f_Yaw(&origin, &target);
+                this->actor.world.rot.z = 0;
+                this->actor.shape.rot = this->actor.world.rot;
+            }
+        }
+
         switch (this->actor.params) {
             case ARROW_SEED:
                 Player_PlaySfx(&player->actor, NA_SE_IT_SLING_SHOT);
@@ -227,6 +264,7 @@ void EnArrow_Shoot(EnArrow* this, PlayState* play) {
             case ARROW_FIRE:
             case ARROW_ICE:
             case ARROW_LIGHT:
+                GameInteractor_Should(VB_EN_ARROW_MAGIC_CONSUMPTION, true, this);
                 Player_PlaySfx(&player->actor, NA_SE_IT_MAGIC_ARROW_SHOT);
                 break;
         }
@@ -241,6 +279,28 @@ void EnArrow_Shoot(EnArrow* this, PlayState* play) {
         } else {
             Actor_SetProjectileSpeed(&this->actor, 150.0f);
             this->timer = 12;
+            // SOH [VR] Physical bow: draw strength sets the shot. A full draw is exactly this
+            // vanilla shot; a partial draw leaves slower, falls from the start, and lives longer
+            // so a weak arrow drops to the ground instead of vanishing mid-air.
+            {
+                f32 vrPower = this->vrPhysicalBowShot ? this->vrBowPower : VrArchery_TakeBowShotPower();
+                if (vrPower > 0.0f && vrPower < 0.99f) {
+                    f32 vrWeak = (1.0f - vrPower) / 0.7f;
+                    Actor_SetProjectileSpeed(&this->actor, 150.0f * vrPower);
+                    this->timer = 12 + (s32)(12.0f * vrWeak);
+                    this->actor.gravity = -1.0f * vrWeak;
+                }
+                this->vrPhysicalBowShot = false;
+            }
+        }
+        // SOH [VR] Physical nuts retain vanilla impact/stun logic, but launch from
+        // the released hand velocity instead of the animation's fixed speed.
+        if (this->vrPhysicalThrow) {
+            this->actor.velocity = this->vrLaunchVelocity;
+            this->actor.speedXZ = sqrtf(SQ(this->actor.velocity.x) + SQ(this->actor.velocity.z));
+            this->actor.gravity = -1.0f;
+            this->timer = 40;
+            this->vrPhysicalThrow = false;
         }
     }
 }
@@ -307,7 +367,14 @@ void EnArrow_Fly(EnArrow* this, PlayState* play) {
     }
 
     if (this->timer < 7.2000003f) {
-        this->actor.gravity = -0.4f;
+        // SOH [VR] Keep a weak physical-bow shot's stronger fall (vanilla arrows reach here at 0).
+        if (this->vrHorseBowShot) {
+            // VR horseback uses a world-space aim dot: keep its physical arrow on that exact
+            // line for the whole flight. On-foot and every non-VR arrow retain vanilla drop.
+            this->actor.gravity = 0.0f;
+        } else if (!((this->actor.params < ARROW_SEED) && (this->actor.gravity < -0.4f))) {
+            this->actor.gravity = -0.4f;
+        }
     }
 
     atTouched = (this->actor.params != ARROW_NORMAL_LIT) && (this->actor.params <= ARROW_SEED) &&
@@ -324,7 +391,7 @@ void EnArrow_Fly(EnArrow* this, PlayState* play) {
             if (this->actor.params == ARROW_NUT) {
                 iREG(50) = -1;
                 Actor_Spawn(&play->actorCtx, play, ACTOR_EN_M_FIRE1, this->actor.world.pos.x, this->actor.world.pos.y,
-                            this->actor.world.pos.z, 0, 0, 0, 0, true);
+                            this->actor.world.pos.z, 0, 0, 0, 0);
                 sfxId = NA_SE_IT_DEKU;
             } else {
                 sfxId = NA_SE_IT_SLING_REFLECT;
@@ -446,7 +513,8 @@ void EnArrow_Update(Actor* thisx, PlayState* play) {
         this->actionFunc(this, play);
     }
 
-    if ((this->actor.params >= ARROW_FIRE) && (this->actor.params <= ARROW_0E)) {
+    if ((this->actor.params >= ARROW_FIRE) && (this->actor.params <= ARROW_0E) &&
+        this->vrDeferredMagicCost == 0) {
         s16 elementalActorIds[] = { ACTOR_ARROW_FIRE, ACTOR_ARROW_ICE,  ACTOR_ARROW_LIGHT,
                                     ACTOR_ARROW_FIRE, ACTOR_ARROW_FIRE, ACTOR_ARROW_FIRE };
 
@@ -500,6 +568,31 @@ void func_809B4800(EnArrow* this, PlayState* play) {
     }
 }
 
+// SOH [VR] Nocked physical-bow arrow: its world.pos/shape.rot are written at game rate, but the
+// bow and string render at headset rate from the live hand, so the arrow visibly trailed them.
+// This limb hook draws each limb exactly as SkelAnime_DrawLimbLod would, but welds the limb's
+// matrix to the live bow hand (as the bowstring is). Only used while the arrow is the player's
+// drawn bow nock; a failed weld leaves the ordinary matrix in place.
+static s32 EnArrow_VrWeldLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* thisx) {
+    MtxF vrCur;
+    Mtx* vrMtx;
+    s32 vrHand = VrArchery_NockedArrowHand();
+
+    if ((*dList == NULL) || (vrHand < 0)) {
+        return false;
+    }
+    Matrix_TranslateRotateZYX(pos, rot);
+    Matrix_Get(&vrCur);
+    vrMtx = MATRIX_NEWMTX(play->state.gfxCtx);
+    Player_VrWeldMtxToHand(play, vrMtx, vrHand, &vrCur.mf[0][0]);
+
+    OPEN_DISPS(play->state.gfxCtx);
+    gSPMatrix(POLY_OPA_DISP++, vrMtx, G_MTX_LOAD);
+    gSPDisplayList(POLY_OPA_DISP++, *dList);
+    CLOSE_DISPS(play->state.gfxCtx);
+    return true;
+}
+
 void EnArrow_Draw(Actor* thisx, PlayState* play) {
     s32 pad;
     EnArrow* this = (EnArrow*)thisx;
@@ -507,8 +600,22 @@ void EnArrow_Draw(Actor* thisx, PlayState* play) {
     f32 scale;
 
     if (this->actor.params <= ARROW_0E) {
+        Player* vrPlayer = GET_PLAYER(play);
+        // SOH [VR] Weld only the player's drawn bow nock (see EnArrow_VrWeldLimbDraw).
+        s32 vrWeld = (this->actor.parent == &vrPlayer->actor) && (vrPlayer->heldActor == &this->actor) &&
+                     (VrArchery_NockedArrowHand() >= 0);
         Gfx_SetupDL_25Opa(play->state.gfxCtx);
-        SkelAnime_DrawLod(play, this->skelAnime.skeleton, this->skelAnime.jointTable, NULL, NULL, this,
+        if (vrWeld) {
+            // SOH [VR] Real-life hand scale: the nocked arrow is sized with the bow, about its nock
+            // end (actor-local model units (-1, 0, -1003), see VrArchery kArrowNockBack) so it
+            // stays on the string. The flight that follows release is the world-sized actor.
+            f32 vrS = VrHand_ScaleFactor();
+            Matrix_Translate(-1.0f, 0.0f, -1003.0f, MTXMODE_APPLY);
+            Matrix_Scale(vrS, vrS, vrS, MTXMODE_APPLY);
+            Matrix_Translate(1.0f, 0.0f, 1003.0f, MTXMODE_APPLY);
+        }
+        SkelAnime_DrawLod(play, this->skelAnime.skeleton, this->skelAnime.jointTable,
+                          vrWeld ? EnArrow_VrWeldLimbDraw : NULL, NULL, this,
                           (this->actor.projectedPos.z < MREG(95)) ? 0 : 1);
     } else if (this->actor.speedXZ != 0.0f) {
         alpha = (Math_CosS(this->timer * 5000) * 127.5f) + 127.5f;

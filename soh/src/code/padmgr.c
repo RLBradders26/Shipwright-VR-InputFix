@@ -4,8 +4,11 @@
 
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/controls/Mouse.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 #include "soh/OTRGlobals.h"
 #include "soh/ResourceManagerHelpers.h"
+
+#include <vr_interface.h>
 
 s32 D_8012D280 = 1;
 
@@ -317,6 +320,243 @@ void PadMgr_HandleRetraceMsg(PadMgr* padMgr) {
     }
     osRecvMesg(queue, NULL, OS_MESG_BLOCK);
     osContGetReadData(padMgr->pads);
+
+    // #region SOH [VR] Map the OpenXR controllers onto the N64 pad (port 0) so the headset controllers
+    // are the default game controller everywhere — gameplay AND menus (this runs before
+    // PadMgr_ProcessInputs, which derives press/rel). OR'd in, so keyboard/gamepad still work alongside.
+    if (VR_IsInitialized() && CVarGetInteger("gVrControllerInput", 1)) {
+        OSContPad* vrPad = &padMgr->pads[0];
+        uint16_t vrL = VR_GetControllerButton(VR_HAND_LEFT);
+        uint16_t vrR = VR_GetControllerButton(VR_HAND_RIGHT);
+        // Set per hand while the ocarina stick-direction bindings claim that thumbstick (see the
+        // ocarina block below): the stick's stock job stands down for the duration so a bound
+        // direction never double-fires alongside it.
+        s32 vrOcaStickClaimed[2] = { 0, 0 };
+
+        // Assignable VR input -> N64 button mapping, configured in VR Settings -> VR Inputs. Each
+        // CVar holds an N64 BUTTON BITMASK (same encoding as the base game's button-combination
+        // selector), so one controller input may press a single button or a whole combination.
+        {
+            // TWO PROFILES, picked by gVrItemSelect, so a player can swap the whole control
+            // scheme back and forth from the menu without re-binding anything.
+            //
+            // CLASSIC (selector off): items are activated by the C buttons you assigned them to.
+            // Defaults: left = Z-target, R-shield, C-left, C-right, Start (stick click), none;
+            //           right = B-sword, none, A, C-down, none, none.
+            // C-Up ships deliberately UNBOUND — ocarina notes come from the dedicated OCARINA
+            // set below, so no gameplay binding needs to carry a note.
+            // Extra face/D-pad and shoulder inputs start unbound; existing six defaults are unchanged.
+            static const char* sVrBindCvars[2][VR_BUTTON_COUNT] = {
+                { "gVrBindLTrigger", "gVrBindLGrip", "gVrBindLPrimary", "gVrBindLSecondary", "gVrBindLStickClick",
+                  "gVrBindLMenu", "gVrBindLExtra1", "gVrBindLExtra2", "gVrBindLShoulder" },
+                { "gVrBindRTrigger", "gVrBindRGrip", "gVrBindRPrimary", "gVrBindRSecondary", "gVrBindRStickClick",
+                  "gVrBindRMenu", "gVrBindRExtra1", "gVrBindRExtra2", "gVrBindRShoulder" },
+            };
+            static const s32 sVrBindDefaults[2][VR_BUTTON_COUNT] = {
+                { BTN_Z, BTN_R, BTN_CLEFT, BTN_CRIGHT, BTN_START, 0 },
+                { BTN_B, 0, BTN_A, BTN_CDOWN, 0, 0 },
+            };
+            // SELECTOR (selector on): the Alyx-style selector equips and the holding hand's
+            // TRIGGER uses the item, so both triggers are reserved (unbound, and skipped below)
+            // and the C buttons no longer pull anything out — they are left unbound here
+            // (ocarina notes live in the dedicated set below). Everything the triggers used to
+            // carry moves:
+            // Z-target to the sword-hand grip, the shield stays on the off-hand grip, A and B
+            // on the face buttons. Start is bound on BOTH the left stick click and the left menu
+            // button, because whichever stick click the selector is set to is eaten by it.
+            // Keep in sync with sVrInputDefsSelector in SohMenuVRSettings.cpp. The triggers have
+            // no CVar (NULL): VrItemSelect_TriggerConsumed always takes them in this set.
+            static const char* sVrBindSelCvars[2][VR_BUTTON_COUNT] = {
+                { NULL, "gVrBindSelLGrip", "gVrBindSelLPrimary", "gVrBindSelLSecondary", "gVrBindSelLStickClick",
+                  "gVrBindSelLMenu", "gVrBindSelLExtra1", "gVrBindSelLExtra2", "gVrBindSelLShoulder" },
+                { NULL, "gVrBindSelRGrip", "gVrBindSelRPrimary", "gVrBindSelRSecondary", "gVrBindSelRStickClick",
+                  "gVrBindSelRMenu", "gVrBindSelRExtra1", "gVrBindSelRExtra2", "gVrBindSelRShoulder" },
+            };
+            static const s32 sVrBindSelDefaults[2][VR_BUTTON_COUNT] = {
+                { 0, BTN_R, 0, 0, BTN_START, BTN_START },
+                { 0, BTN_Z, BTN_A, BTN_B, 0, 0 },
+            };
+            // OCARINA (the ocarina interface is up, in EITHER profile): the five notes get their
+            // own bindable set, because neither gameplay profile has all five note buttons — in
+            // selector mode the C notes had NOTHING to live on, which made the ocarina unplayable.
+            // While VrOcarina_InPlay() this set replaces the gameplay bindings outright and every
+            // selector reservation stands down (both triggers, the selector click, the held-item
+            // trigger mirror — see VrItemSelect.cpp), so notes may sit anywhere. Defaults (the
+            // user's headset layout): D4 (A) = A button, the four C notes on the RIGHT stick
+            // directions (sVrBindOcaStickDefaults below); sharpen (R) = right grip, flatten (Z) =
+            // left grip; B (put the ocarina away) = B button; triggers, X and Y unbound. Pitch
+            // bend rides the left thumbstick, which is already the N64 analog stick below. Keep in
+            // sync with sVrInputDefsOcarina in SohMenuVRSettings.cpp.
+            static const char* sVrBindOcaCvars[2][VR_BUTTON_COUNT] = {
+                { "gVrBindOcaLTrigger", "gVrBindOcaLGrip", "gVrBindOcaLPrimary", "gVrBindOcaLSecondary",
+                  "gVrBindOcaLStickClick", "gVrBindOcaLMenu",
+                  "gVrBindOcaLExtra1", "gVrBindOcaLExtra2", "gVrBindOcaLShoulder" },
+                { "gVrBindOcaRTrigger", "gVrBindOcaRGrip", "gVrBindOcaRPrimary", "gVrBindOcaRSecondary",
+                  "gVrBindOcaRStickClick", "gVrBindOcaRMenu",
+                  "gVrBindOcaRExtra1", "gVrBindOcaRExtra2", "gVrBindOcaRShoulder" },
+            };
+            static const s32 sVrBindOcaDefaults[2][VR_BUTTON_COUNT] = {
+                { 0, BTN_Z, 0, 0, 0, 0 },
+                { 0, BTN_R, BTN_A, BTN_B, 0, 0 },
+            };
+            // OCARINA stick directions: in this set ONLY, the four cardinal deflections of each
+            // thumbstick are bindable inputs too (gameplay sticks keep their stock jobs: move and
+            // turn). Dominant-axis with the same 0.5 threshold as the stock C-stick mapping, so a
+            // diagonal flick plays one note, not two. Default: the right stick carries the four C
+            // notes (up = C-up, down = C-down, left = C-left, right = C-right). A hand with any
+            // direction bound claims that stick outright — vrOcaStickClaimed above — standing
+            // down its stock ocarina job (left: pitch bend / analog stick; right: third-person
+            // C-stick). Order: up, down, left, right. Keep in sync with sVrInputDefsOcarina in
+            // SohMenuVRSettings.cpp.
+            static const char* sVrBindOcaStickCvars[2][4] = {
+                { "gVrBindOcaLStickUp", "gVrBindOcaLStickDown", "gVrBindOcaLStickLeft", "gVrBindOcaLStickRight" },
+                { "gVrBindOcaRStickUp", "gVrBindOcaRStickDown", "gVrBindOcaRStickLeft", "gVrBindOcaRStickRight" },
+            };
+            static const s32 sVrBindOcaStickDefaults[2][4] = {
+                { 0, 0, 0, 0 },
+                { BTN_CUP, BTN_CDOWN, BTN_CLEFT, BTN_CRIGHT },
+            };
+            static const u16 sVrBtnMasks[VR_BUTTON_COUNT] = { VR_BTN_TRIGGER,   VR_BTN_GRIP,       VR_BTN_PRIMARY,
+                                                VR_BTN_SECONDARY, VR_BTN_THUMBCLICK, VR_BTN_MENU,
+                                                VR_BTN_EXTRA1, VR_BTN_EXTRA2, VR_BTN_SHOULDER };
+            s32 vrSelProfile = CVarGetInteger("gVrItemSelect", 1);
+            s32 vrOcarina = VrOcarina_InPlay();
+            s32 vrHandIdx, vrBtnIdx;
+            // SOH [VR] Pause menu: the grips turn the pages by PHYSICAL side, left grip = page
+            // left, right grip = page right, whatever the gameplay profile binds them to (the
+            // selector profile has the LEFT grip on R = page RIGHT and the right grip on Z = page
+            // LEFT, which read backwards in the world-space inventory). Page-left is Z, or L with
+            // the GameCube switcher enhancement, exactly as KaleidoScope_HandlePageToggles reads it.
+            extern PlayState* gPlayState;
+            s32 vrPauseMenu = (gPlayState != NULL) && (gPlayState->pauseCtx.state != 0) &&
+                              (gPlayState->pauseCtx.debugState == 0);
+            s32 vrPageLeftBtn = CVarGetInteger(CVAR_ENHANCEMENT("NGCKaleidoSwitcher"), 0) ? BTN_L : BTN_Z;
+            for (vrHandIdx = 0; vrHandIdx < 2; vrHandIdx++) {
+                uint16_t vrState = (vrHandIdx == 0) ? vrL : vrR;
+                for (vrBtnIdx = 0; vrBtnIdx < VR_BUTTON_COUNT; vrBtnIdx++) {
+                    if (vrPauseMenu && !vrOcarina && (sVrBtnMasks[vrBtnIdx] == VR_BTN_GRIP)) {
+                        if (vrState & VR_BTN_GRIP) {
+                            vrPad->button |= (vrHandIdx == VR_HAND_LEFT) ? vrPageLeftBtn : BTN_R;
+                        }
+                        continue;
+                    }
+                    // SOH [VR] The Alyx-style item selector owns its configured input outright:
+                    // its normal binding never fires (the opening click must not leak). In
+                    // selector mode both triggers belong to item use, and the two-hand quick-swap
+                    // chord suspends its inputs' bindings while fully held. While aiming a
+                    // projectile (classic mode), the aim hand's trigger is the FIRE control and
+                    // its binding is likewise suspended.
+                    if (VrItemSelect_ConsumesInput(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrItemSelect_TriggerConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrItemSelect_SwapConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrItemThrow_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrBoomerang_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrLens_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrMask_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrHammer_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrBlock_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrCarry_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrDoor_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrClimb_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrArchery_PinchConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrCombat_AimTriggerConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx])) {
+                        continue;
+                    }
+                    if (vrState & sVrBtnMasks[vrBtnIdx]) {
+                        s32 mapped = vrOcarina      ? CVarGetInteger(sVrBindOcaCvars[vrHandIdx][vrBtnIdx],
+                                                                     sVrBindOcaDefaults[vrHandIdx][vrBtnIdx])
+                                     : vrSelProfile ? (sVrBindSelCvars[vrHandIdx][vrBtnIdx] == NULL
+                                                           ? 0
+                                                           : CVarGetInteger(sVrBindSelCvars[vrHandIdx][vrBtnIdx],
+                                                                            sVrBindSelDefaults[vrHandIdx][vrBtnIdx]))
+                                                    : CVarGetInteger(sVrBindCvars[vrHandIdx][vrBtnIdx],
+                                                                     sVrBindDefaults[vrHandIdx][vrBtnIdx]);
+                        // Physical archery exclusively owns the gallery's forced B-slot weapon:
+                        // no face button or ordinary binding may also invoke stock shooting.
+                        // VrArchery_ItemButtonMask injects B below only for a physical nock.
+                        if (VrArchery_GalleryOwnsWeapon()) {
+                            mapped &= ~BTN_B;
+                        }
+                        // Mask to the real pad bits (drops the PC-only modifier bits if selected).
+                        vrPad->button |= (u16)(mapped & 0xFFFF);
+                    }
+                }
+            }
+
+            // SOH [VR] Selector mode: the trigger of the hand HOLDING the item is that item's
+            // button. Mirrored as raw button STATE, not a one-frame emulated press, so the
+            // vanilla pad path derives press, held and release from it by itself — press nocks
+            // the bow, holding keeps it drawn, releasing looses the arrow, and every other item
+            // (bombs, bottles, boomerang aim-and-throw, magic) obeys its own vanilla rules with
+            // nothing re-implemented. Returns 0 when nothing is held in that hand.
+            for (vrHandIdx = 0; vrHandIdx < 2; vrHandIdx++) {
+                if (((vrHandIdx == 0) ? vrL : vrR) & VR_BTN_TRIGGER) {
+                    vrPad->button |= VrItemSelect_TriggerItemMask(vrHandIdx);
+                }
+            }
+
+            // SOH [VR] Physical archery: a pinched nock IS the weapon's item button, held
+            // down for as long as the string hand keeps the pinch — the same raw-state mirror
+            // as the trigger above, so nock/draw/release all come out of the vanilla pad path.
+            vrPad->button |= VrArchery_ItemButtonMask();
+
+            // SOH [VR] Ocarina stick-direction bindings (sVrBindOcaStickCvars above): fire the
+            // bound mask while the dominant axis holds past the threshold — raw button STATE,
+            // like everything else here, so press/rel derive naturally.
+            if (vrOcarina) {
+                for (vrHandIdx = 0; vrHandIdx < 2; vrHandIdx++) {
+                    s32 vrDirIdx;
+                    s32 vrHeldDir = -1;
+                    float vrSx = 0.0f, vrSy = 0.0f;
+                    for (vrDirIdx = 0; vrDirIdx < 4; vrDirIdx++) {
+                        if (CVarGetInteger(sVrBindOcaStickCvars[vrHandIdx][vrDirIdx],
+                                           sVrBindOcaStickDefaults[vrHandIdx][vrDirIdx]) != 0) {
+                            vrOcaStickClaimed[vrHandIdx] = 1;
+                        }
+                    }
+                    if (!vrOcaStickClaimed[vrHandIdx]) {
+                        continue;
+                    }
+                    VR_GetThumbstick(vrHandIdx, &vrSx, &vrSy);
+                    if ((vrSy * vrSy) >= (vrSx * vrSx)) {
+                        vrHeldDir = (vrSy > 0.5f) ? 0 : (vrSy < -0.5f) ? 1 : -1;
+                    } else {
+                        vrHeldDir = (vrSx < -0.5f) ? 2 : (vrSx > 0.5f) ? 3 : -1;
+                    }
+                    if (vrHeldDir >= 0) {
+                        s32 mapped = CVarGetInteger(sVrBindOcaStickCvars[vrHandIdx][vrHeldDir],
+                                                    sVrBindOcaStickDefaults[vrHandIdx][vrHeldDir]);
+                        // Mask to the real pad bits (drops the PC-only modifier bits if selected).
+                        vrPad->button |= (u16)(mapped & 0xFFFF);
+                    }
+                }
+            }
+        }
+
+        // Left thumbstick -> movement (control stick). Overrides only when actually pushed (deadzone),
+        // so it doesn't zero out a keyboard/gamepad stick when idle.
+        float lx = 0.0f, ly = 0.0f;
+        VR_GetThumbstick(VR_HAND_LEFT, &lx, &ly);
+        if (!vrOcaStickClaimed[VR_HAND_LEFT] && ((lx * lx) + (ly * ly)) > (0.15f * 0.15f)) {
+            vrPad->stick_x = (s8)CLAMP(lx * 127.0f, -128.0f, 127.0f);
+            vrPad->stick_y = (s8)CLAMP(ly * 127.0f, -128.0f, 127.0f);
+        }
+
+        // Right thumbstick -> C-buttons ONLY where the game genuinely owns the stick as the
+        // stock C-stick: menus (the pause inventory ASSIGNS items with C presses; the world-space
+        // pause menu counts, VrPause_InputMenuMode) and THIRD PERSON. In first-person play the stick NEVER fires items or C-buttons —
+        // a stick position is far too easy to graze mid-play; items live on the bindable VR
+        // Inputs and the Alyx-style selector, and the X axis belongs to artificial turning.
+        float rx = 0.0f, ry = 0.0f;
+        VR_GetThumbstick(VR_HAND_RIGHT, &rx, &ry);
+        if (!vrOcaStickClaimed[VR_HAND_RIGHT] && (VrPause_InputMenuMode() || !VR_GetFirstPerson())) {
+            if (ry > 0.5f) vrPad->button |= BTN_CUP;
+            if (ry < -0.5f) vrPad->button |= BTN_CDOWN;
+            if (rx > 0.5f) vrPad->button |= BTN_CRIGHT;
+            if (rx < -0.5f) vrPad->button |= BTN_CLEFT;
+        }
+    }
+    // #endregion
 
     Mouse_UpdateAll();
 

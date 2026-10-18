@@ -5,8 +5,6 @@
 
 #include "soh/Enhancements/gameconsole.h"
 #include "soh/frame_interpolation.h"
-#include "soh/Enhancements/debugconsole.h"
-#include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include <overlays/actors/ovl_En_Niw/z_en_niw.h>
 #include <overlays/misc/ovl_kaleido_scope/z_kaleido_scope.h>
 #include "soh/Enhancements/enhancementTypes.h"
@@ -18,6 +16,8 @@
 
 #include <libultraship/libultraship.h>
 #include <vr_interface.h>
+#include "soh/Enhancements/vr-combat/VrCombat.h"
+#include "soh/Enhancements/vr-combat/VrCutsceneView.h"
 
 #include <time.h>
 #include <assert.h>
@@ -38,7 +38,6 @@ Input* D_8012D1F8 = NULL;
 
 PlayState* gPlayState;
 s16 firstInit = 0;
-s16 gEnPartnerId;
 
 void Play_SpawnScene(PlayState* play, s32 sceneId, s32 spawn);
 
@@ -333,6 +332,10 @@ u8 CheckDungeonCount() {
         dungeonCount++;
     }
 
+    if (Flags_GetRandomizerInf(RAND_INF_DUNGEONS_DONE_GANONS_TOWER)) {
+        dungeonCount++;
+    }
+
     return dungeonCount;
 }
 
@@ -352,24 +355,6 @@ u8 CheckBridgeRewardCount() {
             break;
     }
     return bridgeRewardCount;
-}
-
-u8 CheckLACSRewardCount() {
-    u8 lacsRewardCount = 0;
-
-    switch (Randomizer_GetSettingValue(RSK_LACS_OPTIONS)) {
-        case RO_LACS_WILDCARD_REWARD:
-            if (Flags_GetRandomizerInf(RAND_INF_GREG_FOUND)) {
-                lacsRewardCount += 1;
-            }
-            break;
-        case RO_LACS_GREG_REWARD:
-            if (Flags_GetRandomizerInf(RAND_INF_GREG_FOUND)) {
-                lacsRewardCount += 1;
-            }
-            break;
-    }
-    return lacsRewardCount;
 }
 
 void Play_Init(GameState* thisx) {
@@ -426,9 +411,9 @@ void Play_Init(GameState* thisx) {
         Camera_ChangeStatus(&play->subCameras[i], CAM_STAT_UNK100);
     }
 
-    play->cameraPtrs[MAIN_CAM] = &play->mainCamera;
-    play->cameraPtrs[MAIN_CAM]->uid = 0;
-    play->activeCamera = MAIN_CAM;
+    play->cameraPtrs[CAM_ID_MAIN] = &play->mainCamera;
+    play->cameraPtrs[CAM_ID_MAIN]->uid = 0;
+    play->activeCamera = CAM_ID_MAIN;
     func_8005AC48(&play->mainCamera, 0xFF);
     // Sram_Init(this, &this->sramCtx);
     Regs_InitData(play);
@@ -466,38 +451,38 @@ void Play_Init(GameState* thisx) {
     if (gSaveContext.gameMode != GAMEMODE_NORMAL || gSaveContext.cutsceneIndex >= 0xFFF0) {
         gSaveContext.nayrusLoveTimer = 0;
         Magic_Reset(play);
-        gSaveContext.sceneSetupIndex = SCENE_LAYER_CUTSCENE_FIRST + (gSaveContext.cutsceneIndex & 0xF);
+        gSaveContext.sceneLayer = SCENE_LAYER_CUTSCENE_FIRST + (gSaveContext.cutsceneIndex & 0xF);
     } else if (!LINK_IS_ADULT && IS_DAY) {
-        gSaveContext.sceneSetupIndex = SCENE_LAYER_CHILD_DAY;
+        gSaveContext.sceneLayer = SCENE_LAYER_CHILD_DAY;
     } else if (!LINK_IS_ADULT && !IS_DAY) {
-        gSaveContext.sceneSetupIndex = SCENE_LAYER_CHILD_NIGHT;
+        gSaveContext.sceneLayer = SCENE_LAYER_CHILD_NIGHT;
     } else if (LINK_IS_ADULT && IS_DAY) {
-        gSaveContext.sceneSetupIndex = SCENE_LAYER_ADULT_DAY;
+        gSaveContext.sceneLayer = SCENE_LAYER_ADULT_DAY;
     } else {
-        gSaveContext.sceneSetupIndex = SCENE_LAYER_ADULT_NIGHT;
+        gSaveContext.sceneLayer = SCENE_LAYER_ADULT_NIGHT;
     }
 
     // save the base scene layer (before accounting for the special cases below) to use later for the transition type
-    baseSceneLayer = gSaveContext.sceneSetupIndex;
+    baseSceneLayer = gSaveContext.sceneLayer;
 
     if ((gEntranceTable[((void)0, gSaveContext.entranceIndex)].scene == SCENE_HYRULE_FIELD) && !LINK_IS_ADULT &&
         !IS_CUTSCENE_LAYER) {
         if (CHECK_QUEST_ITEM(QUEST_KOKIRI_EMERALD) && CHECK_QUEST_ITEM(QUEST_GORON_RUBY) &&
             CHECK_QUEST_ITEM(QUEST_ZORA_SAPPHIRE)) {
-            gSaveContext.sceneSetupIndex = 1;
+            gSaveContext.sceneLayer = 1;
         } else {
-            gSaveContext.sceneSetupIndex = 0;
+            gSaveContext.sceneLayer = 0;
         }
     } else if ((gEntranceTable[((void)0, gSaveContext.entranceIndex)].scene == SCENE_KOKIRI_FOREST) && LINK_IS_ADULT &&
                !IS_CUTSCENE_LAYER) {
-        gSaveContext.sceneSetupIndex = (Flags_GetEventChkInf(EVENTCHKINF_USED_FOREST_TEMPLE_BLUE_WARP)) ? 3 : 2;
+        gSaveContext.sceneLayer = (Flags_GetEventChkInf(EVENTCHKINF_USED_FOREST_TEMPLE_BLUE_WARP)) ? 3 : 2;
     }
 
-    Play_SpawnScene(
-        play, gEntranceTable[((void)0, gSaveContext.entranceIndex) + ((void)0, gSaveContext.sceneSetupIndex)].scene,
-        gEntranceTable[((void)0, gSaveContext.sceneSetupIndex) + ((void)0, gSaveContext.entranceIndex)].spawn);
+    Play_SpawnScene(play,
+                    gEntranceTable[((void)0, gSaveContext.entranceIndex) + ((void)0, gSaveContext.sceneLayer)].scene,
+                    gEntranceTable[((void)0, gSaveContext.sceneLayer) + ((void)0, gSaveContext.entranceIndex)].spawn);
 
-    osSyncPrintf("\nSCENE_NO=%d COUNTER=%d\n", ((void)0, gSaveContext.entranceIndex), gSaveContext.sceneSetupIndex);
+    osSyncPrintf("\nSCENE_NO=%d COUNTER=%d\n", ((void)0, gSaveContext.entranceIndex), gSaveContext.sceneLayer);
 
 #if 0
     // When entering Gerudo Valley in the credits, trigger the GC emulator to play the ending movie.
@@ -520,8 +505,7 @@ void Play_Init(GameState* thisx) {
             gSaveContext.bgsDayCount++;
             gSaveContext.dogIsLost = true;
 
-            if (Inventory_ReplaceItem(play, ITEM_WEIRD_EGG, ITEM_CHICKEN) || Inventory_HatchPocketCucco(play)) {
-                GameInteractor_ExecuteOnCuccoOrChickenHatch();
+            if (Inventory_HatchWeirdEgg(play) || Inventory_HatchPocketCucco(play)) {
                 Message_StartTextbox(play, 0x3066, NULL);
             }
 
@@ -545,8 +529,8 @@ void Play_Init(GameState* thisx) {
     play->state.destroy = Play_Destroy;
     play->transitionTrigger = TRANS_TRIGGER_END;
     play->unk_11E16 = 0xFF;
-    play->unk_11E18 = 0;
-    play->unk_11DE9 = false;
+    play->bgCoverAlpha = 0;
+    play->haltAllActors = false;
 
     if (gSaveContext.gameMode != GAMEMODE_TITLE_SCREEN) {
         if (gSaveContext.nextTransitionType == TRANS_NEXT_TYPE_DEFAULT) {
@@ -595,7 +579,11 @@ void Play_Init(GameState* thisx) {
         gSlotAgeReqs[SLOT_TRADE_CHILD] = AGE_REQ_CHILD;
     }
 
-    func_800304DC(play, &play->actorCtx, play->linkActorEntry);
+    // Handle Rocs Feather requirement
+    gItemAgeReqs[ITEM_ROCS_FEATHER] = AGE_REQ_NONE;
+    gSlotAgeReqs[SLOT_NAYRUS_LOVE] = AGE_REQ_NONE;
+
+    Actor_InitContext(play, &play->actorCtx, play->linkActorEntry);
 
     while (!func_800973FC(play, &play->roomCtx)) {
         ; // Empty Loop
@@ -632,12 +620,11 @@ void Play_Init(GameState* thisx) {
     } else {
         play->unk_1242B = 0;
     }
-
     Interface_SetSceneRestrictions(play);
     Environment_PlaySceneSequence(play);
     gSaveContext.seqId = play->sequenceCtx.seqId;
     gSaveContext.natureAmbienceId = play->sequenceCtx.natureAmbienceId;
-    func_8002DF18(play, GET_PLAYER(play));
+    Actor_InitPlayerHorse(play, GET_PLAYER(play));
     AnimationContext_Update(play, &play->animationCtx);
     gSaveContext.respawnFlag = 0;
 
@@ -683,11 +670,8 @@ void Play_Init(GameState* thisx) {
     }
 #endif
 
-    if (CVarGetInteger(CVAR_ENHANCEMENT("IvanCoopModeEnabled"), 0)) {
-        Actor_Spawn(&play->actorCtx, play, gEnPartnerId, GET_PLAYER(play)->actor.world.pos.x,
-                    GET_PLAYER(play)->actor.world.pos.y + Player_GetHeight(GET_PLAYER(play)) + 5.0f,
-                    GET_PLAYER(play)->actor.world.pos.z, 0, 0, 0, 1, true);
-    }
+    // nextEntranceIndex was not initialized, so the previous value was carried over during soft resets.
+    gPlayState->nextEntranceIndex = gSaveContext.entranceIndex;
 }
 
 void Play_Update(PlayState* play) {
@@ -783,10 +767,10 @@ void Play_Update(PlayState* play) {
             }
 
             // Start RTA timing on first non-c-up input after intro cutscene
-            if (!gSaveContext.ship.stats.fileCreatedAt && !Player_InCsMode(play) &&
+            if (!gSaveContext.ship.stats.firstInput && !Player_InCsMode(play) &&
                 ((input[0].press.button && input[0].press.button != 0x8) || input[0].rel.stick_x != 0 ||
                  input[0].rel.stick_y != 0)) {
-                gSaveContext.ship.stats.fileCreatedAt = GetUnixTimestamp();
+                gSaveContext.ship.stats.firstInput = GetUnixTimestamp();
             }
         }
         // #endregion
@@ -814,7 +798,7 @@ void Play_Update(PlayState* play) {
                 case TRANS_MODE_SETUP:
                     if (play->transitionTrigger != TRANS_TRIGGER_END) {
                         s16 sceneLayer = 0;
-                        Interface_ChangeAlpha(1);
+                        Interface_ChangeHudVisibilityMode(1);
 
                         if (gSaveContext.cutsceneIndex >= 0xFFF0) {
                             sceneLayer = SCENE_LAYER_CUTSCENE_FIRST + (gSaveContext.cutsceneIndex & 0xF);
@@ -1182,15 +1166,17 @@ void Play_Update(PlayState* play) {
                 }
 
                 if (play->actorCtx.freezeFlashTimer && (play->actorCtx.freezeFlashTimer-- < 5)) {
-                    osSyncPrintf("FINISH=%d\n", play->actorCtx.freezeFlashTimer);
+                    if (GameInteractor_Should(VB_FLASH_SCREEN_FOR_FINISHING_BLOW, true)) {
+                        osSyncPrintf("FINISH=%d\n", play->actorCtx.freezeFlashTimer);
 
-                    if ((play->actorCtx.freezeFlashTimer > 0) && ((play->actorCtx.freezeFlashTimer % 2) != 0)) {
-                        play->envCtx.fillScreen = true;
-                        play->envCtx.screenFillColor[0] = play->envCtx.screenFillColor[1] =
-                            play->envCtx.screenFillColor[2] = 150;
-                        play->envCtx.screenFillColor[3] = 80;
-                    } else {
-                        play->envCtx.fillScreen = false;
+                        if ((play->actorCtx.freezeFlashTimer > 0) && ((play->actorCtx.freezeFlashTimer % 2) != 0)) {
+                            play->envCtx.fillScreen = true;
+                            play->envCtx.screenFillColor[0] = play->envCtx.screenFillColor[1] =
+                                play->envCtx.screenFillColor[2] = 150;
+                            play->envCtx.screenFillColor[3] = 80;
+                        } else {
+                            play->envCtx.fillScreen = false;
+                        }
                     }
                 } else {
                     PLAY_LOG(3606);
@@ -1210,7 +1196,7 @@ void Play_Update(PlayState* play) {
 
                     PLAY_LOG(3637);
 
-                    if (!play->unk_11DE9) {
+                    if (!play->haltAllActors) {
                         Actor_UpdateAll(play, &play->actorCtx);
                     }
 
@@ -1303,6 +1289,8 @@ void Play_Update(PlayState* play) {
 skip:
     PLAY_LOG(3801);
 
+    GameInteractor_ExecuteOnCameraState(play);
+
     if (!isPaused || gDbgCamEnabled) {
         s32 i;
 
@@ -1354,6 +1342,9 @@ void Play_Draw(PlayState* play) {
     static u32 lastPauseHeight;
     static bool lastAltAssets;
     static bool hasCapturedPauseBuffer;
+    // SOH [VR] The world-space pause menu needs no backdrop, so its capture is skipped; if the menu
+    // falls back to the flat panel mid-pause (toggle off, third person), capture for real.
+    static bool sVrPauseCaptureSkipped = false;
     bool recapturePauseBuffer = false;
 
     // If the size has changed, alt assets toggled, or dropped frames leading to the buffer not being copied,
@@ -1361,13 +1352,188 @@ void Play_Draw(PlayState* play) {
     // This requires not rendering kaleido during this copy to avoid kaleido itself being copied too.
     if ((R_PAUSE_MENU_MODE == 2 || R_PAUSE_MENU_MODE == 3) &&
         (lastPauseWidth != OTRGetGameRenderWidth() || lastPauseHeight != OTRGetGameRenderHeight() ||
-         lastAltAssets != ResourceMgr_IsAltAssetsEnabled() || !hasCapturedPauseBuffer)) {
+         lastAltAssets != ResourceMgr_IsAltAssetsEnabled() || !hasCapturedPauseBuffer ||
+         (sVrPauseCaptureSkipped && !VrPause_WorldSpace()))) {
         R_PAUSE_MENU_MODE = 1;
         recapturePauseBuffer = true;
     }
     // #endregion
 
     OPEN_DISPS(gfxCtx);
+
+    // SOH [VR] The world-space pause menu draws the frozen world every frame, and draws register
+    // colliders (Link's shield and physical blade, some actors). Play_Update checks whatever was
+    // registered since its last clear, so a paused draw's registrations would land on the first
+    // tick after resume (a sword waved while paused could hit on unpause). Vanilla never draws
+    // while paused, so the contract is "a paused frame registers nothing": the engine's own (unused)
+    // SAC mode makes every CollisionCheck_Set* refuse, and the pre-pause lists stay exactly as left.
+    bool vrPauseFreezeCollision = VrPause_WorldSpace() && !(play->colChkCtx.sacFlags & 1);
+    if (vrPauseFreezeCollision) {
+        CollisionCheck_EnableSAC(play, &play->colChkCtx);
+    }
+
+    // #region SOH [VR] First-person camera anchor — push Link's head position to the VR layer.
+    // The VR view is then composed as (head anchor + HMD offset/orientation); see vr_openxr.cpp.
+    static bool sVrFirstPersonWasActive = false;
+    static bool sVrFarCamFallback = false;
+    if (VR_IsInitialized()) {
+        // Clear last frame's live hand-matrix tags; the player limb override re-registers this frame.
+        VR_ClearHandMatrices();
+
+        // First-person availability guard: when the active camera is far from Link — a cutscene
+        // framing a distant location, or Link not yet positioned during a scene load — Link's eyes
+        // are by definition not where the game wants you looking, so ride the director's camera
+        // (the third-person frame) until the camera returns to him. Hysteresis (fall out beyond
+        // the threshold, return under 60% of it) prevents flicker at the boundary; the anchor's
+        // own snap-on-large-jump logic makes both transitions a clean cut.
+        if (CVarGetInteger("gVrFirstPerson", 1) && CVarGetInteger("gVrFpAutoDirectorCam", 1)) {
+            Player* vrGuardPlayer = GET_PLAYER(play);
+            Camera* vrGuardCam = GET_ACTIVE_CAM(play);
+            f32 vrCamDx = vrGuardCam->eye.x - vrGuardPlayer->actor.world.pos.x;
+            f32 vrCamDy = vrGuardCam->eye.y - vrGuardPlayer->actor.world.pos.y;
+            f32 vrCamDz = vrGuardCam->eye.z - vrGuardPlayer->actor.world.pos.z;
+            f32 vrCamDistSq = SQ(vrCamDx) + SQ(vrCamDy) + SQ(vrCamDz);
+            f32 vrFarDist = CVarGetFloat("gVrFpFallbackDist", 1200.0f);
+            f32 vrNearDist = vrFarDist * 0.6f;
+            if (sVrFarCamFallback) {
+                if (vrCamDistSq < SQ(vrNearDist)) {
+                    sVrFarCamFallback = false;
+                }
+            } else if (vrCamDistSq > SQ(vrFarDist)) {
+                sVrFarCamFallback = true;
+            }
+        } else {
+            sVrFarCamFallback = false;
+        }
+
+        // Cutscenes in third person (opt-in, per-cutscene table in VrCutsceneView.cpp): ride the
+        // original camera exactly like third-person VR, then return to Link's eyes. The return
+        // recenters heading/roomscale like the far-camera fallback does.
+        bool vrCutsceneThirdPerson = VrCutsceneView_ThirdPerson(play);
+
+        if (CVarGetInteger("gVrFirstPerson", 1) && !sVrFarCamFallback && !vrCutsceneThirdPerson) {
+            Player* vrPlayer = GET_PLAYER(play);
+            // Anchor to the actor ROOT (smooth, no walk-cycle bob) plus eye height, instead of the
+            // animated head bone (actor.focus.pos) which carries the up/down bob and sway. The body
+            // mesh still animates visually; the camera stays smooth (VR comfort: no uninitiated
+            // vertical motion). Tune eye height with gVrHeadHeightOffset.
+            // Heading recenter: capture the HMD->world yaw offset when first-person turns on, and
+            // whenever the player requests a manual recenter (set gVrRecenterHeading 1 in console).
+            // Also re-zero roomscale here so the player's current physical position maps to Link's
+            // current body — must run before we read the roomscale origin for the anchor below.
+            if (!sVrFirstPersonWasActive || CVarGetInteger("gVrRecenterHeading", 0)) {
+                VR_RecenterHeading(vrPlayer->actor.shape.rot.y);
+                VR_ResetRoomscale();
+                CVarSetInteger("gVrRecenterHeading", 0);
+            }
+            sVrFirstPersonWasActive = true;
+
+            Vec3f vrHead = vrPlayer->actor.world.pos;
+            {
+                f32 vrEyeHeight = Player_GetHeight(vrPlayer);
+                // Auto world scale calibrates against the STANDING eye height (never the crawl-
+                // reduced one), so the game ground meets the real floor and child/adult swaps
+                // rescale automatically.
+                VR_SetLinkEyeHeight(vrEyeHeight + CVarGetFloat("gVrHeadHeightOffset", -9.0f));
+                // Crawlspaces: Link is prone, so the eye belongs just above the ground — standing
+                // height would float the camera into (or above) the tunnel ceiling.
+                if (vrPlayer->stateFlags2 & PLAYER_STATE2_CRAWLING) {
+                    vrEyeHeight *= 0.5f;
+                }
+                // Riding: Link is SEATED and his root already sits at the saddle, so adding
+                // standing eye height floated the camera a meter above his head. Seated eye
+                // height above the seat is about half of standing (same ratio as the crawl
+                // correction).
+                if (vrPlayer->stateFlags1 & PLAYER_STATE1_ON_HORSE) {
+                    vrEyeHeight *= 0.5f;
+                }
+                vrHead.y += vrEyeHeight + CVarGetFloat("gVrHeadHeightOffset", -9.0f);
+            }
+            // Head position relative to Link's body, tunable from VR Settings. Forward/side follow
+            // Link's facing. All offsets are GAME UNITS applied to the anchor, so they interact with
+            // world scale the physically-correct way: a lower head really does bring the ground
+            // closer, by exactly offset/worldScale meters.
+            // The offset is swept from the body's center at eye height against the same walls (and
+            // wall radius) that stop the body, and only ever shortens toward that center: facing a
+            // wall, the eye pulls back into Link instead of poking past his collision.
+            {
+                f32 vrHeadFwd = CVarGetFloat("gVrHeadOffsetForward", 0.0f);
+                f32 vrHeadSide = CVarGetFloat("gVrHeadOffsetSide", 0.0f);
+                if (vrHeadFwd != 0.0f || vrHeadSide != 0.0f) {
+                    s16 vrBodyYaw = vrPlayer->actor.shape.rot.y;
+                    f32 vrOffX = Math_SinS(vrBodyYaw) * vrHeadFwd - Math_CosS(vrBodyYaw) * vrHeadSide;
+                    f32 vrOffZ = Math_CosS(vrBodyYaw) * vrHeadFwd + Math_SinS(vrBodyYaw) * vrHeadSide;
+                    f32 vrOffLenSq = SQ(vrOffX) + SQ(vrOffZ);
+                    Vec3f vrCamFrom = vrPlayer->actor.world.pos;
+                    // SOH [VR] Small body collider: the offset is part of the view's place inside
+                    // Link's circle, which VrBody_ClampView bounds below — no sweep at the big radius
+                    // (that collapsed the offset to nothing at every wall).
+                    f32 vrSweepRadius = VrBody_Active() ? 0.0f : vrPlayer->ageProperties->wallCheckRadius;
+                    Vec3f vrCamTo = { vrCamFrom.x + vrOffX, vrCamFrom.y, vrCamFrom.z + vrOffZ };
+                    Vec3f vrCamRes;
+                    CollisionPoly* vrCamPoly;
+                    s32 vrCamBgId;
+                    f32 vrKeep = 1.0f;
+                    if ((vrSweepRadius > 0.0f) &&
+                        BgCheck_EntitySphVsWall3(&play->colCtx, &vrCamRes, &vrCamTo, &vrCamFrom, vrSweepRadius,
+                                                 &vrCamPoly, &vrCamBgId, &vrPlayer->actor, vrHead.y - vrCamFrom.y)) {
+                        vrKeep = ((vrCamRes.x - vrCamFrom.x) * vrOffX + (vrCamRes.z - vrCamFrom.z) * vrOffZ) /
+                                 vrOffLenSq;
+                        vrKeep = CLAMP(vrKeep, 0.0f, 1.0f);
+                    }
+                    vrHead.x += vrOffX * vrKeep;
+                    vrHead.z += vrOffZ * vrKeep;
+                }
+            }
+            // Roomscale: push the COMBINED anchor (body head minus the physical-walk displacement
+            // already baked into the body by Player_UpdateCommon), so the eye stays continuous as the
+            // body slides under the head and the existing anchor interpolation stays smooth. The
+            // origin is horizontal only (x,z); y stays the body head height.
+            // Physical head translation reaches the view ONLY through the body: Player_UpdateCommon
+            // has already moved Link as far as his collision allows, so whatever is left (a blocked
+            // step, or any state where roomscale doesn't move the body) is discarded here, down to
+            // the body-move deadzone (0.1, Player_UpdateCommon). The camera never leans away from
+            // Link, so it can't pass a wall that stops him.
+            VR_SetViewFade(0.0f);
+            // While the world-space pause menu is up nothing moves the body, so the stock clamp
+            // would pin the head: VrPause_LeanClamp allows real leaning then (and briefly after,
+            // while the body catches up).
+            // SOH [VR] Small body collider (VrBody, default on): instead of discarding it, the view
+            // keeps what the body couldn't follow, bounded to a small circle inside Link's own
+            // collision circle — closer to walls than his body, never past anything that stops it.
+            if (!VrBody_ClampView(play, vrPlayer, &vrHead.x)) {
+                VR_ClampRoomscaleLean(VrPause_LeanClamp());
+            }
+            float vrRsOrigin[2];
+            VR_GetRoomscaleOrigin(vrRsOrigin);
+            vrHead.x -= vrRsOrigin[0];
+            vrHead.z -= vrRsOrigin[1];
+            VR_SetFirstPerson(true);
+            VR_SetCameraAnchor(vrHead.x, vrHead.y, vrHead.z);
+        } else {
+            // #region SOH [VR] Third-person VR — the stock game in stereo 3D: the playspace rides
+            // the game camera exactly (position AND facing, cutscene shots included), with the
+            // player's head adding free look and 6DOF lean on top. Anchor = the active camera's
+            // eye; base yaw = the camera's facing (camDir.y, computed by Camera_Update from the
+            // game's own eye/at BEFORE the VR culling override — no feedback). Pitch/roll are
+            // deliberately not folded in: the horizon must stay level with real gravity, so
+            // vertically-framed shots are matched by tilting your actual head.
+            // IMPORTANT: anchor from the CAMERA's own eye, not play->view.eye — Camera_Update
+            // overwrites the view with the VR pose for culling, and anchoring to that would chase
+            // our own HMD offset in a feedback loop.
+            Camera* vrCam = GET_ACTIVE_CAM(play);
+            VR_SetFirstPerson(false);
+            sVrFirstPersonWasActive = false;
+            VR_SetCameraAnchor(vrCam->eye.x, vrCam->eye.y, vrCam->eye.z);
+            VR_SetCameraYaw(vrCam->camDir.y);
+        }
+        // SOH [VR] World-space pause: Camera_Update is frozen with the game, so the cull view would
+        // stay where the head pointed when the menu opened. Rebuild it from the live head.
+        if (VrPause_WorldSpace()) {
+            VrPause_RefreshCullView(play);
+        }
+    }
+    // #endregion
 
     gSegments[4] = VIRTUAL_TO_PHYSICAL(play->objectCtx.status[play->objectCtx.mainKeepIndex].segment);
     gSegments[5] = VIRTUAL_TO_PHYSICAL(play->objectCtx.status[play->objectCtx.subKeepIndex].segment);
@@ -1392,6 +1558,8 @@ void Play_Draw(PlayState* play) {
     Gfx_SetupFrame(gfxCtx, 0, 0, 0);
 
     if ((HREG(80) != 10) || (HREG(82) != 0)) {
+        GameInteractor_ExecuteOnPlayDrawBegin();
+
         POLY_OPA_DISP = Play_SetFog(play, POLY_OPA_DISP);
         POLY_XLU_DISP = Play_SetFog(play, POLY_XLU_DISP);
 
@@ -1482,7 +1650,8 @@ void Play_Draw(PlayState* play) {
             R_PAUSE_MENU_MODE = 0;
         }
 
-        if (R_PAUSE_MENU_MODE == 3) {
+        // SOH [VR] The world-space pause menu keeps drawing the (frozen) world instead of the backdrop.
+        if (R_PAUSE_MENU_MODE == 3 && !VrPause_WorldSpace()) {
             Gfx* gfxP = POLY_OPA_DISP;
 
             // SOH [Port] Draw game framebuffer using our custom handling
@@ -1557,11 +1726,11 @@ void Play_Draw(PlayState* play) {
         }
 
         if ((HREG(80) != 10) || (HREG(84) != 0)) {
-            Environment_FillScreen(gfxCtx, 0, 0, 0, play->unk_11E18, FILL_SCREEN_OPA);
+            Environment_FillScreen(gfxCtx, 0, 0, 0, play->bgCoverAlpha, FILL_SCREEN_OPA);
         }
 
         if ((HREG(80) != 10) || (HREG(85) != 0)) {
-            func_800315AC(play, &play->actorCtx);
+            Actor_DrawAll(play, &play->actorCtx);
         }
 
         if ((HREG(80) != 10) || (HREG(86) != 0)) {
@@ -1621,7 +1790,14 @@ void Play_Draw(PlayState* play) {
                 lastAltAssets = ResourceMgr_IsAltAssetsEnabled();
                 hasCapturedPauseBuffer = false;
 
-                FB_CopyToFramebuffer(&gfxP, 0, gPauseFrameBuffer, false, &hasCapturedPauseBuffer);
+                // SOH [VR] No backdrop for the world-space pause menu (and in stereo the overlay list
+                // is the HUD quad's, the wrong place for a frame copy).
+                sVrPauseCaptureSkipped = VrPause_WorldSpace();
+                if (sVrPauseCaptureSkipped) {
+                    hasCapturedPauseBuffer = true;
+                } else {
+                    FB_CopyToFramebuffer(&gfxP, 0, gPauseFrameBuffer, false, &hasCapturedPauseBuffer);
+                }
 
                 // Set the state back to ready after the recapture is done
                 if (recapturePauseBuffer) {
@@ -1643,7 +1819,11 @@ void Play_Draw(PlayState* play) {
 
         // Draw Enhancements that need to be placed in the world. This happens before the PostWorldDraw
         // so that they aren't drawn when the pause menu is up (e.g. collision viewer, actor name tags)
-        GameInteractor_ExecuteOnPlayDrawEnd();
+        // SOH [VR] The world-space pause menu reaches this point with the menu up (the world keeps
+        // drawing); keep the contract above: every hook here assumes the game is not paused.
+        if (!VrPause_WorldSpace()) {
+            GameInteractor_ExecuteOnPlayDrawEnd();
+        }
 
     Play_Draw_DrawOverlayElements:
         if ((HREG(80) != 10) || (HREG(89) != 0)) {
@@ -1670,6 +1850,10 @@ Play_Draw_skip:
 
     Camera_Finish(GET_ACTIVE_CAM(play));
 
+    if (vrPauseFreezeCollision) {
+        CollisionCheck_DisableSAC(play, &play->colChkCtx);
+    }
+
     CLOSE_DISPS(gfxCtx);
 
     Interface_DrawTotalGameplayTimer(play);
@@ -1692,7 +1876,7 @@ void Play_Main(GameState* thisx) {
 
     if (play->envCtx.unk_EE[2] == 0 && CVarGetInteger(CVAR_GENERAL("LetItSnow"), 0)) {
         play->envCtx.unk_EE[3] = 64;
-        Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_OBJECT_KANKYO, 0, 0, 0, 0, 0, 0, 3, 0);
+        Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_OBJECT_KANKYO, 0, 0, 0, 0, 0, 0, 3);
     }
 
     D_8012D1F8 = &play->state.input[0];
@@ -1878,7 +2062,7 @@ void func_800C016C(PlayState* play, Vec3f* src, Vec3f* dest) {
 s16 Play_CreateSubCamera(PlayState* play) {
     s16 i;
 
-    for (i = SUBCAM_FIRST; i < NUM_CAMS; i++) {
+    for (i = CAM_ID_SUB_FIRST; i < NUM_CAMS; i++) {
         if (play->cameraPtrs[i] == NULL) {
             break;
         }
@@ -1893,7 +2077,7 @@ s16 Play_CreateSubCamera(PlayState* play) {
                      CYAN) " " VT_RST "\n",
                  i);
 
-    play->cameraPtrs[i] = &play->subCameras[i - SUBCAM_FIRST];
+    play->cameraPtrs[i] = &play->subCameras[i - CAM_ID_SUB_FIRST];
     Camera_Init(play->cameraPtrs[i], &play->view, &play->colCtx, play);
     play->cameraPtrs[i]->thisIdx = i;
 
@@ -1917,7 +2101,7 @@ s16 Play_ChangeCameraStatus(PlayState* play, s16 camId, s16 status) {
 void Play_ClearCamera(PlayState* play, s16 camId) {
     s16 camIdx = (camId == SUBCAM_ACTIVE) ? play->activeCamera : camId;
 
-    if (camIdx == MAIN_CAM) {
+    if (camIdx == CAM_ID_MAIN) {
         osSyncPrintf(VT_COL(RED, WHITE) "camera control: error: never clear camera !!\n" VT_RST);
     }
 
@@ -1935,13 +2119,13 @@ void Play_ClearCamera(PlayState* play, s16 camId) {
 void Play_ClearAllSubCameras(PlayState* play) {
     s16 i;
 
-    for (i = SUBCAM_FIRST; i < NUM_CAMS; i++) {
+    for (i = CAM_ID_SUB_FIRST; i < NUM_CAMS; i++) {
         if (play->cameraPtrs[i] != NULL) {
             Play_ClearCamera(play, i);
         }
     }
 
-    play->activeCamera = MAIN_CAM;
+    play->activeCamera = CAM_ID_MAIN;
 }
 
 Camera* Play_GetCamera(PlayState* play, s16 camId) {
@@ -2032,11 +2216,11 @@ s32 func_800C0808(PlayState* play, s16 camId, Player* player, s16 setting) {
 
     camera = play->cameraPtrs[camIdx];
     Camera_InitPlayerSettings(camera, player);
-    return Camera_ChangeSetting(camera, setting);
+    return Camera_RequestSetting(camera, setting);
 }
 
 s32 Play_CameraChangeSetting(PlayState* play, s16 camId, s16 setting) {
-    return Camera_ChangeSetting(Play_GetCamera(play, camId), setting);
+    return Camera_RequestSetting(Play_GetCamera(play, camId), setting);
 }
 
 void func_800C08AC(PlayState* play, s16 camId, s16 arg2) {
@@ -2045,7 +2229,7 @@ void func_800C08AC(PlayState* play, s16 camId, s16 arg2) {
 
     Play_ClearCamera(play, camIdx);
 
-    for (i = SUBCAM_FIRST; i < NUM_CAMS; i++) {
+    for (i = CAM_ID_SUB_FIRST; i < NUM_CAMS; i++) {
         if (play->cameraPtrs[i] != NULL) {
             osSyncPrintf(
                 VT_COL(RED, WHITE) "camera control: error: return to main, other camera left. %d cleared!!\n" VT_RST,
@@ -2055,10 +2239,10 @@ void func_800C08AC(PlayState* play, s16 camId, s16 arg2) {
     }
 
     if (arg2 <= 0) {
-        Play_ChangeCameraStatus(play, MAIN_CAM, CAM_STAT_ACTIVE);
-        play->cameraPtrs[MAIN_CAM]->childCamIdx = play->cameraPtrs[MAIN_CAM]->parentCamIdx = SUBCAM_FREE;
+        Play_ChangeCameraStatus(play, CAM_ID_MAIN, CAM_STAT_ACTIVE);
+        play->cameraPtrs[CAM_ID_MAIN]->childCamIdx = play->cameraPtrs[CAM_ID_MAIN]->parentCamIdx = SUBCAM_FREE;
     } else {
-        OnePointCutscene_Init(play, 1020, arg2, NULL, MAIN_CAM);
+        OnePointCutscene_Init(play, 1020, arg2, NULL, CAM_ID_MAIN);
     }
 }
 
@@ -2156,7 +2340,7 @@ void Play_TriggerRespawn(PlayState* play) {
     Play_LoadToLastEntrance(play);
 }
 
-s32 func_800C0CB8(PlayState* play) {
+s32 Play_CamIsNotFixed(PlayState* play) {
     return (play->roomCtx.curRoom.meshHeader->base.type != 1) && (YREG(15) != 0x20) && (YREG(15) != 0x30) &&
            (YREG(15) != 0x40) && (play->sceneNum != SCENE_CASTLE_COURTYARD_GUARDS_DAY);
 }
@@ -2223,7 +2407,7 @@ void Play_PerformSave(PlayState* play) {
             (gSaveContext.equips.buttonItems[0] == ITEM_NONE && !Flags_GetInfTable(INFTABLE_SWORDLESS))) {
 
             gSaveContext.equips.buttonItems[0] = gSaveContext.buttonStatus[0];
-            Interface_RandoRestoreSwordless();
+            GameInteractor_Should(VB_TEMP_B_RESTORE_SWORDLESS, true);
         }
 
         Save_SaveFile();

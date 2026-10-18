@@ -1,15 +1,16 @@
 #ifdef _WIN32
 #include <Windows.h>
+#include <locale.h>
 #endif
 
 #include "global.h"
 #include "vt.h"
 #include "stdio.h"
+#include <libultraship/bridge/crashhandlerbridge.h>
+#include <fast/vr_benchmark.h>
 #include <soh/Enhancements/bootcommands.h>
 #include "soh/OTRGlobals.h"
-
-#include <libultraship/bridge.h>
-#include "soh/CrashHandlerExp.h"
+#include "soh/CrashHandlerExt.h"
 
 s32 gScreenWidth = SCREEN_WIDTH;
 s32 gScreenHeight = SCREEN_HEIGHT;
@@ -44,21 +45,32 @@ void Main_LogSystemHeap(void) {
 }
 
 #ifdef _WIN32
-int SDL_main(int argc, char** argv) {
+int SDL_main(int argc, char* argv[]) {
+    vr_benchmark_configure(argc, argv);
     AllocConsole();
     (void)freopen("CONIN$", "r", stdin);
     (void)freopen("CONOUT$", "w", stdout);
     (void)freopen("CONOUT$", "w", stderr);
 #ifndef _DEBUG
-    ShowWindow(GetConsoleWindow(), SW_HIDE);
+    if (!vr_benchmark_is_enabled()) {
+        ShowWindow(GetConsoleWindow(), SW_HIDE);
+    }
 #endif
+    // Allow non-ascii characters for Windows
+    setlocale(LC_ALL, ".UTF8");
 
+#elif defined(__ANDROID__)
+// SOH [VR] SDL's Java activity dlsym()s SDL_main from libsoh.so and runs it on its native thread.
+__attribute__((visibility("default"))) int SDL_main(int argc, char* argv[]) {
 #else //_WIN32
-int main(int argc, char** argv) {
+int main(int argc, char* argv[]) {
 #endif
-
+#ifndef _WIN32
+    vr_benchmark_configure(argc, argv);
+#endif
+    vr_benchmark_remove_arguments(&argc, argv);
     GameConsole_Init();
-    InitOTR();
+    InitOTR(argc, argv);
     // TODO: Was moved to below InitOTR because it requires window to be setup. But will be late to catch crashes.
     CrashHandlerRegisterCallback(CrashHandler_PrintSohData);
     BootCommands_Init();

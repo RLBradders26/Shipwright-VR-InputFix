@@ -3,12 +3,16 @@
 #include "objects/gameplay_field_keep/gameplay_field_keep.h"
 #include "objects/object_link_boy/object_link_boy.h"
 #include "objects/object_link_child/object_link_child.h"
-#include "objects/object_triforce_spot/object_triforce_spot.h"
 #include "overlays/actors/ovl_Demo_Effect/z_demo_effect.h"
 
+#include <libultraship/bridge/resourcebridge.h>
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
+#include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/Enhancements/randomizer/draw.h"
 #include "soh/ResourceManagerHelpers.h"
+
+#include <vr_interface.h>
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 #include <stdlib.h>
 
@@ -540,7 +544,9 @@ s32 Player_ActionToModelGroup(Player* this, s32 actionParam) {
 }
 
 void Player_SetModelsForHoldingShield(Player* this) {
-    if ((this->stateFlags1 & PLAYER_STATE1_SHIELDING) &&
+    // SOH [VR] Physical shield: held in the off hand whenever physically possible — no stance
+    // flag, no button. VrShield re-asserts this every tick while VrCombat_ShieldHeld.
+    if (((this->stateFlags1 & PLAYER_STATE1_SHIELDING) || VrCombat_ShieldHeld(this)) &&
         ((this->itemAction < 0) || (this->itemAction == this->heldItemAction))) {
         if ((CVarGetInteger(CVAR_CHEAT("ShieldTwoHanded"), 0) && (this->heldItemAction != PLAYER_IA_DEKU_STICK) ||
              !Player_HoldsTwoHandedWeapon(this)) &&
@@ -569,7 +575,16 @@ void Player_SetModelsForHoldingShield(Player* this) {
                 this->sheathDLists = &sPlayerDListGroups[this->sheathType][1];
             }
             this->modelAnimType = PLAYER_ANIMTYPE_2;
-            this->itemAction = -1;
+            // SOH [VR] Physical shield holds the shield perpetually WITHOUT the stance flag.
+            // itemAction = -1 is the vanilla "models diverged" marker, and Player_UpdateItems
+            // only processes item buttons while (itemAction == heldItemAction || SHIELDING) —
+            // in the stance, the flag's arm keeps buttons alive despite the -1; held
+            // physically full-time, the -1 would close that gate FOREVER (B could never draw
+            // the sword, C never use an item). VrShield re-syncs the models itself on its
+            // falling edge, so the marker stays stance-only.
+            if (this->stateFlags1 & PLAYER_STATE1_SHIELDING) {
+                this->itemAction = -1;
+            }
         }
     }
 }
@@ -649,6 +664,7 @@ void Player_SetModels(Player* this, s32 modelGroup) {
     this->waistDLists = &sPlayerDListGroups[gPlayerModelTypes[modelGroup][4]][gSaveContext.linkAge];
 
     Player_SetModelsForHoldingShield(this);
+    GameInteractor_ExecuteOnPlayerSetModels(this, modelGroup);
 }
 
 void Player_SetModelGroup(Player* this, s32 modelGroup) {
@@ -692,7 +708,9 @@ void Player_UpdateBottleHeld(PlayState* play, Player* this, s32 item, s32 action
         this->heldItemAction = actionParam;
     }
 
-    this->itemAction = actionParam;
+    if (GameInteractor_Should(VB_PLAYER_UPDATE_BOTTLE_HELD, true, this)) {
+        this->itemAction = actionParam;
+    }
 }
 
 void Player_ReleaseLockOn(Player* this) {
@@ -706,7 +724,7 @@ void Player_ReleaseLockOn(Player* this) {
  * TODO: Learn more about this and give a name to PLAYER_STATE1_19
  */
 void Player_ClearZTargeting(Player* this) {
-    if ((this->actor.bgCheckFlags & 1) ||
+    if ((this->actor.bgCheckFlags & BGCHECKFLAG_GROUND) ||
         (this->stateFlags1 & (PLAYER_STATE1_CLIMBING_LADDER | PLAYER_STATE1_ON_HORSE | PLAYER_STATE1_IN_WATER)) ||
         (!(this->stateFlags1 & (PLAYER_STATE1_JUMPING | PLAYER_STATE1_FREEFALL)) &&
          ((this->actor.world.pos.y - this->actor.floorHeight) < 100.0f))) {
@@ -843,16 +861,6 @@ s32 Player_HoldsSlingshot(Player* this) {
     return this->heldItemAction == PLAYER_IA_SLINGSHOT;
 }
 
-// #region SOH [Enhancement]
-s32 Player_HoldsBoomerang(Player* this) {
-    return this->heldItemAction == PLAYER_IA_BOOMERANG;
-}
-
-s32 Player_AimsBoomerang(Player* this) {
-    return Player_HoldsBoomerang(this) && (this->unk_834 != 0);
-}
-// #endregion
-
 s32 func_8008F128(Player* this) {
     return Player_HoldsHookshot(this) && (this->heldActor == NULL);
 }
@@ -930,28 +938,32 @@ return_neg:
 s32 Player_GetEnvironmentalHazard(PlayState* play) {
     Player* this = GET_PLAYER(play);
     TextTriggerEntry* triggerEntry;
-    s32 var;
+    s32 envHazard;
 
     if (play->roomCtx.curRoom.behaviorType2 == ROOM_BEHAVIOR_TYPE2_3) { // Room is hot
-        var = 0;
+        envHazard = PLAYER_ENV_HAZARD_HOTROOM - 1;
     } else if ((this->underwaterTimer > 80) &&
                ((this->currentBoots == PLAYER_BOOTS_IRON) || (this->underwaterTimer >= 300))) { // Deep underwater
-        var = ((this->currentBoots == PLAYER_BOOTS_IRON) && (this->actor.bgCheckFlags & 1)) ? 1 : 3;
+        envHazard = ((this->currentBoots == PLAYER_BOOTS_IRON) && (this->actor.bgCheckFlags & BGCHECKFLAG_GROUND))
+                        ? (PLAYER_ENV_HAZARD_UNDERWATER_FLOOR - 1)
+                        : (PLAYER_ENV_HAZARD_UNDERWATER_FREE - 1);
     } else if (this->stateFlags1 & PLAYER_STATE1_IN_WATER) { // Swimming
-        var = 2;
+        envHazard = PLAYER_ENV_HAZARD_SWIMMING - 1;
     } else {
-        return 0;
+        return PLAYER_ENV_HAZARD_NONE;
     }
 
     // Trigger general textboxes under certain conditions, like "It's so hot in here!"
     if (!Player_InCsMode(play)) {
-        triggerEntry = &sTextTriggers[var];
+        triggerEntry = &sTextTriggers[envHazard];
 
         if ((triggerEntry->flag != 0) && !(gSaveContext.textTriggerFlags & triggerEntry->flag) &&
-            (((var == 0) &&
+            (((envHazard == (PLAYER_ENV_HAZARD_HOTROOM - 1)) &&
               (this->currentTunic != PLAYER_TUNIC_GORON && CVarGetInteger(CVAR_CHEAT("SuperTunic"), 0) == 0 &&
                CVarGetInteger(CVAR_ENHANCEMENT("DisableTunicWarningText"), 0) == 0)) ||
-             (((var == 1) || (var == 3)) && (this->currentBoots == PLAYER_BOOTS_IRON) &&
+             (((envHazard == (PLAYER_ENV_HAZARD_UNDERWATER_FLOOR - 1)) ||
+               (envHazard == (PLAYER_ENV_HAZARD_UNDERWATER_FREE - 1))) &&
+              (this->currentBoots == PLAYER_BOOTS_IRON) &&
               (this->currentTunic != PLAYER_TUNIC_ZORA && CVarGetInteger(CVAR_CHEAT("SuperTunic"), 0) == 0 &&
                CVarGetInteger(CVAR_ENHANCEMENT("DisableTunicWarningText"), 0) == 0)))) {
             Message_StartTextbox(play, triggerEntry->textId, NULL);
@@ -959,7 +971,7 @@ s32 Player_GetEnvironmentalHazard(PlayState* play) {
         }
     }
 
-    return var + 1;
+    return envHazard + 1;
 }
 
 u8 sEyeMouthIndexes[][2] = {
@@ -1023,6 +1035,11 @@ Color_RGB8 sTunicColors[] = {
 Color_RGB8 sGauntletColors[] = {
     { 255, 255, 255 },
     { 254, 207, 15 },
+    // #region SOH [RBA] values matching OOB reads on N64
+    { 0, 0, 6 },
+    { 2, 89, 24 },
+    { 6, 2, 90 },
+    { 96, 6, 2 },
 };
 
 Gfx* sBootDListGroups[][2] = {
@@ -1076,7 +1093,9 @@ void Player_DrawImpl(PlayState* play, void** skeleton, Vec3s* jointTable, s32 dL
         color = &sTemp;
     }
 
-    gDPSetEnvColor(POLY_OPA_DISP++, color->r, color->g, color->b, 0);
+    if (GameInteractor_Should(VB_APPLY_TUNIC_COLOR, true, data, color)) {
+        gDPSetEnvColor(POLY_OPA_DISP++, color->r, color->g, color->b, 0);
+    }
 
     // If we have a custom link model, always use the most detailed LOD
     if (Player_IsCustomLinkModel()) {
@@ -1087,26 +1106,35 @@ void Player_DrawImpl(PlayState* play, void** skeleton, Vec3s* jointTable, s32 dL
 
     SkelAnime_DrawFlexLod(play, skeleton, jointTable, dListCount, overrideLimbDraw, postLimbDraw, data, lod);
 
-    if (((CVarGetInteger(CVAR_ENHANCEMENT("FirstPersonGauntlets"), 0) && LINK_IS_ADULT) ||
+    // SOH [VR] The gauntlet plates / Goron bracelet / boots below are drawn on the skeleton's limb
+    // matrices AFTER the limb pass, so nulling the forearm / foot display lists in
+    // Player_OverrideLimbDrawGameplayVRFirstPerson does not hide them: they kept rendering on the
+    // animation-driven arms under the invisible body. Mirror that override's conditions here: the
+    // forearms hide under gVrHideBody or gVrMotionHands, the feet under gVrHideBody only.
+    s32 vrFirstPersonBody = (overrideLimbDraw == Player_OverrideLimbDrawGameplayVRFirstPerson);
+    s32 vrArmsHidden =
+        vrFirstPersonBody && (CVarGetInteger("gVrHideBody", 1) || CVarGetInteger("gVrMotionHands", 1));
+    s32 vrFeetHidden = vrFirstPersonBody && CVarGetInteger("gVrHideBody", 1);
+
+    if (!GameInteractor_InvisibleLinkActive() &&
+        ((CVarGetInteger(CVAR_ENHANCEMENT("FirstPersonGauntlets"), 0) && LINK_IS_ADULT) ||
          (overrideLimbDraw != Player_OverrideLimbDrawGameplayFirstPerson)) &&
         (overrideLimbDraw != Player_OverrideLimbDrawGameplayCrawling) &&
         (gSaveContext.gameMode != GAMEMODE_END_CREDITS)) {
         if (LINK_IS_ADULT) {
             s32 strengthUpgrade = CUR_UPG_VALUE(UPG_STRENGTH);
 
-            if (strengthUpgrade >= 2) { // silver or gold gauntlets
+            if (strengthUpgrade >= 2 && !vrArmsHidden) { // silver or gold gauntlets; SOH [VR] not on hidden arms
                 gDPPipeSync(POLY_OPA_DISP++);
 
                 color = &sGauntletColors[strengthUpgrade - 2];
                 if (strengthUpgrade == PLAYER_STR_SILVER_G &&
                     CVarGetInteger(CVAR_COSMETIC("Gloves.SilverGauntlets.Changed"), 0)) {
-                    sTemp = CVarGetColor24(CVAR_COSMETIC("Gloves.SilverGauntlets.Value"),
-                                           sGauntletColors[PLAYER_STR_SILVER_G - 2]);
+                    sTemp = CVarGetColor24(CVAR_COSMETIC("Gloves.SilverGauntlets.Value"), *color);
                     color = &sTemp;
                 } else if (strengthUpgrade == PLAYER_STR_GOLD_G &&
                            CVarGetInteger(CVAR_COSMETIC("Gloves.GoldenGauntlets.Changed"), 0)) {
-                    sTemp = CVarGetColor24(CVAR_COSMETIC("Gloves.GoldenGauntlets.Value"),
-                                           sGauntletColors[PLAYER_STR_GOLD_G - 2]);
+                    sTemp = CVarGetColor24(CVAR_COSMETIC("Gloves.GoldenGauntlets.Value"), *color);
                     color = &sTemp;
                 }
                 gDPSetEnvColor(POLY_OPA_DISP++, color->r, color->g, color->b, 0);
@@ -1121,14 +1149,14 @@ void Player_DrawImpl(PlayState* play, void** skeleton, Vec3s* jointTable, s32 dL
                                                     : gLinkAdultRightGauntletPlate3DL);
             }
 
-            if (boots != 0) {
+            if (boots != 0 && !vrFeetHidden) { // SOH [VR] no boots on hidden feet
                 Gfx** bootDLists = sBootDListGroups[boots - 1];
 
                 gSPDisplayList(POLY_OPA_DISP++, bootDLists[0]);
                 gSPDisplayList(POLY_OPA_DISP++, bootDLists[1]);
             }
         } else {
-            if (Player_GetStrength() > PLAYER_STR_NONE) {
+            if (Player_GetStrength() > PLAYER_STR_NONE && !vrArmsHidden) { // SOH [VR] bracelet rides the forearm
                 gSPDisplayList(POLY_OPA_DISP++, gLinkChildGoronBraceletDL);
             }
         }
@@ -1234,7 +1262,7 @@ void func_8008F87C(PlayState* play, Player* this, SkelAnime* skelAnime, Vec3f* p
             skelAnime->jointTable[shinLimbIndex].z = skelAnime->jointTable[shinLimbIndex].z + temp1;
             skelAnime->jointTable[footLimbIndex].z = skelAnime->jointTable[footLimbIndex].z + temp2 - temp1;
 
-            temp3 = func_80041D4C(&play->colCtx, sp88, sp84);
+            temp3 = SurfaceType_GetFloorType(&play->colCtx, sp88, sp84);
 
             if ((temp3 >= 2) && (temp3 < 4) && !SurfaceType_IsWallDamage(&play->colCtx, sp88, sp84)) {
                 footprintPos.y = sp80;
@@ -1289,12 +1317,12 @@ s32 Player_OverrideLimbDrawGameplayCommon(PlayState* play, s32 limbIndex, Gfx** 
         D_80160000 = &this->meleeWeaponInfo[2].base;
 
         if (!LINK_IS_ADULT) {
-            if (!(this->skelAnime.moveFlags & 4) || (this->skelAnime.moveFlags & 1)) {
+            if (!(this->skelAnime.movementFlags & 4) || (this->skelAnime.movementFlags & 1)) {
                 pos->x *= 0.64f;
                 pos->z *= 0.64f;
             }
 
-            if (!(this->skelAnime.moveFlags & 4) || (this->skelAnime.moveFlags & 2)) {
+            if (!(this->skelAnime.movementFlags & 4) || (this->skelAnime.movementFlags & 2)) {
                 pos->y *= 0.64f;
             }
         }
@@ -1316,12 +1344,14 @@ s32 Player_OverrideLimbDrawGameplayCommon(PlayState* play, s32 limbIndex, Gfx** 
         if (limbIndex == PLAYER_LIMB_HEAD) {
             if (CVarGetInteger(CVAR_COSMETIC("Link.HeadScale.Changed"), 0)) {
                 f32 scale = CVarGetFloat(CVAR_COSMETIC("Link.HeadScale.Value"), 1.0f);
-                Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
-                if (scale > 1.2f) {
-                    Matrix_Translate(-((LINK_IS_ADULT ? 320.0f : 200.0f) * scale), 0.0f, 0.0f, MTXMODE_APPLY);
-                } else if (scale < 1.0f) {
-                    Matrix_Translate((LINK_IS_ADULT ? 3600.0f : 2900.0f) * ABS(scale - 1.0f), 0.0f, 0.0f,
-                                     MTXMODE_APPLY);
+                if (scale != 1.0f) {
+                    Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
+                    if (scale > 1.2f) {
+                        Matrix_Translate(-((LINK_IS_ADULT ? 320.0f : 200.0f) * scale), 0.0f, 0.0f, MTXMODE_APPLY);
+                    } else if (scale < 1.0f) {
+                        Matrix_Translate((LINK_IS_ADULT ? 3600.0f : 2900.0f) * ABS(scale - 1.0f), 0.0f, 0.0f,
+                                         MTXMODE_APPLY);
+                    }
                 }
             }
             rot->x += this->headLimbRot.z;
@@ -1330,8 +1360,10 @@ s32 Player_OverrideLimbDrawGameplayCommon(PlayState* play, s32 limbIndex, Gfx** 
         } else if (limbIndex == PLAYER_LIMB_L_HAND) {
             if (CVarGetInteger(CVAR_COSMETIC("Link.SwordScale.Changed"), 0)) {
                 f32 scale = CVarGetFloat(CVAR_COSMETIC("Link.SwordScale.Value"), 1.0f);
-                Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
-                Matrix_Translate(-((LINK_IS_ADULT ? 320.0f : 200.0f) * scale), 0.0f, 0.0f, MTXMODE_APPLY);
+                if (scale != 1.0f) {
+                    Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
+                    Matrix_Translate(-((LINK_IS_ADULT ? 320.0f : 200.0f) * (scale - 1.0f)), 0.0f, 0.0f, MTXMODE_APPLY);
+                }
             }
         } else if (limbIndex == PLAYER_LIMB_UPPER) {
             if (this->upperLimbYawSecondary != 0) {
@@ -1373,7 +1405,9 @@ s32 Player_OverrideLimbDrawGameplayDefault(PlayState* play, s32 limbIndex, Gfx**
             if ((sLeftHandType == PLAYER_MODELTYPE_LH_BGS) && (gSaveContext.swordHealth <= 0.0f)) {
                 dLists += 4;
             } else if ((sLeftHandType == PLAYER_MODELTYPE_LH_BOOMERANG) &&
-                       (this->stateFlags1 & PLAYER_STATE1_BOOMERANG_THROWN)) {
+                       // SOH [VR] The physical boomerang module owns the model while it is in the
+                       // pocket, in the hand or in flight: the fist draws open, as when thrown.
+                       ((this->stateFlags1 & PLAYER_STATE1_BOOMERANG_THROWN) || VrBoomerang_HidesHandModel())) {
                 dLists = &gPlayerLeftHandOpenDLs[gSaveContext.linkAge];
                 sLeftHandType = PLAYER_MODELTYPE_LH_OPEN;
             } else if ((this->leftHandType == PLAYER_MODELTYPE_LH_OPEN) && (this->actor.speedXZ > 2.0f) &&
@@ -1433,10 +1467,16 @@ s32 Player_OverrideLimbDrawGameplayDefault(PlayState* play, s32 limbIndex, Gfx**
         }
     }
 
+    GameInteractor_Should(VB_PLAYER_OVERRIDE_LIMB_DRAW, true, limbIndex, dList, thisx, play);
+
     if (GameInteractor_InvisibleLinkActive()) {
         this->actor.shape.shadowDraw = NULL;
         *dList = NULL;
     }
+
+    // Anchor VR extension: dummy players stay on this normal full-body path, but their transmitted
+    // headset/controller matrices replace the head and hand limb poses when available.
+    Anchor_ApplyRemoteVrLimbPose(this, limbIndex);
 
     return false;
 }
@@ -1479,7 +1519,215 @@ s32 Player_OverrideLimbDrawGameplayFirstPerson(PlayState* play, s32 limbIndex, G
         }
     }
 
+    GameInteractor_Should(VB_PLAYER_OVERRIDE_LIMB_DRAW, true, limbIndex, dList, thisx, play);
+
     return false;
+}
+
+// VR first-person: draw Link's FULL body normally (unlike the vanilla first-person override, which
+// hides everything), but cull the head and hat so they don't clip into the headset camera.
+// Tracks back-face culling left inverted by the previous limb's mirrored hand, so we clear it on the
+// next limb once that hand's mesh + held item have drawn.
+static s32 sVrHandInvertCulling = false;
+
+// SOH [VR] 20 Hz hand-pose snapshot per VR hand, for extracting hand-LOCAL child transforms
+// (bow/slingshot string) that the interpreter re-composes against the LIVE controller pose —
+// welding derived geometry to the live-rendered hand instead of trailing it at game rate.
+static MtxF sVrHandLimbMtxF[2];
+static s32 sVrHandLimbFrame[2] = { -1, -1 };
+
+// SOH [VR] The same weld for a matrix built outside the player draw (the nocked arrow): `mtx`
+// (the Mtx about to be emitted) was computed from `curMf16` (MtxF layout) this frame, against
+// this frame's snapshot of `vrHand`. False = no snapshot this frame; the caller's plain matrix
+// stands, exactly as before.
+s32 Player_VrWeldMtxToHand(PlayState* play, const void* mtx, s32 vrHand, const float* curMf16);
+
+// SOH [VR] Physical carrying: the hand every Mtx made by Matrix_ToMtx is welded to while a held object
+// draws (VrCarry_BeginDrawWeld / EndDrawWeld around its actor draw); -1 = none.
+extern PlayState* gPlayState;
+int32_t gVrMtxWeldHand = -1;
+
+void Player_VrWeldCurrentMtx(const void* mtx, const float* curMf16) {
+    if ((gVrMtxWeldHand >= 0) && (gPlayState != NULL)) {
+        Player_VrWeldMtxToHand(gPlayState, mtx, gVrMtxWeldHand, curMf16);
+    }
+}
+
+// SOH [VR] A new Mtx from the current matrix stack, welded to the controller driving L_HAND (the
+// sword hand): what Player_PostLimbDrawGameplay draws on the 20 Hz hand pose (the Deku Stick, the
+// bottle) then rides the live hand like the limb itself. Plain MATRIX_NEWMTX outside VR.
+static Mtx* Player_VrNewMtxOnSwordHand(PlayState* play) {
+    MtxF vrCur;
+    Mtx* mtx;
+
+    Matrix_Get(&vrCur);
+    mtx = MATRIX_NEWMTX(play->state.gfxCtx);
+    Player_VrWeldMtxToHand(play, mtx, CVarGetInteger("gVrLeftHanded", 0) ? VR_HAND_LEFT : VR_HAND_RIGHT,
+                           &vrCur.mf[0][0]);
+    return mtx;
+}
+
+s32 Player_VrWeldMtxToHand(PlayState* play, const void* mtx, s32 vrHand, const float* curMf16) {
+    MtxF vrInv;
+    MtxF vrLocal;
+    MtxF vrCur;
+
+    Player* player = GET_PLAYER(play);
+    if (!(VR_IsInitialized() && (VR_GetFirstPerson() || VrArchery_Covers(player))) ||
+        (vrHand != VR_HAND_LEFT && vrHand != VR_HAND_RIGHT) ||
+        (sVrHandLimbFrame[vrHand] != (s32)play->state.frames)) {
+        return false;
+    }
+    for (s32 i = 0; i < 16; i++) {
+        vrCur.mf[i / 4][i % 4] = curMf16[i];
+    }
+    SkinMatrix_Invert(&sVrHandLimbMtxF[vrHand], &vrInv);
+    SkinMatrix_MtxFMtxFMult(&vrInv, &vrCur, &vrLocal);
+    VR_RegisterHandChildMatrix(mtx, vrHand, &vrLocal.mf[0][0]);
+    return true;
+}
+
+s32 Player_OverrideLimbDrawGameplayVRFirstPerson(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot,
+                                                 void* thisx) {
+    Player* this = (Player*)thisx;
+    s32 ret = Player_OverrideLimbDrawGameplayDefault(play, limbIndex, dList, pos, rot, thisx);
+
+    if (sVrHandInvertCulling) {
+        OPEN_DISPS(play->state.gfxCtx);
+        gSPClearExtraGeometryMode(POLY_OPA_DISP++, G_EX_INVERT_CULLING);
+        CLOSE_DISPS(play->state.gfxCtx);
+        sVrHandInvertCulling = false;
+    }
+
+    // Cull the head + hat (the camera sits inside Link's head).
+    if (limbIndex == PLAYER_LIMB_HEAD || limbIndex == PLAYER_LIMB_HAT) {
+        *dList = NULL;
+        return ret;
+    }
+
+    // SOH [VR] Optional invisible body: hide every limb except the controller-pinned hands (held
+    // items ride the hand matrices, so sword/shield stay visible). With motion hands off, the
+    // hands belong to the body's arms, so everything hides. Third person is unaffected (it uses
+    // the normal draw path).
+    if (CVarGetInteger("gVrHideBody", 1)) {
+        s32 vrIsHandLimb = (limbIndex == PLAYER_LIMB_L_HAND) || (limbIndex == PLAYER_LIMB_R_HAND);
+        if (!(vrIsHandLimb && CVarGetInteger("gVrMotionHands", 1))) {
+            *dList = NULL;
+            return ret;
+        }
+    }
+
+    // #region SOH [VR] Motion-control floating hands — hide the upper arms and pin each hand to its
+    // controller. We replace the hand limb's matrix with the controller's world pose (built in the VR
+    // layer), then re-apply Link's model scale; held items (sword/shield) draw on the same matrix in
+    // PostLimbDraw, so they follow for free. Link's LEFT hand holds the sword / RIGHT holds the shield;
+    // by default the player's RIGHT controller drives the sword hand (gVrLeftHanded swaps). Because the
+    // hand floats to the controller's world pose, which limb we borrow doesn't matter visually.
+    if (CVarGetInteger("gVrMotionHands", 1)) {
+        if (limbIndex == PLAYER_LIMB_L_SHOULDER || limbIndex == PLAYER_LIMB_L_FOREARM ||
+            limbIndex == PLAYER_LIMB_R_SHOULDER || limbIndex == PLAYER_LIMB_R_FOREARM) {
+            *dList = NULL;
+            return ret;
+        }
+        // SOH [VR] Lifting a gauntlet pillar: the hands are Link's animated hands (on the pillar), so the
+        // pillar's pose and its throw are the base game's (Player_VrPillarLift).
+        if ((limbIndex == PLAYER_LIMB_L_HAND || limbIndex == PLAYER_LIMB_R_HAND) && !Player_VrPillarLift(this)) {
+            // R_HAND rides the off hand, except while it holds the hookshot, which goes to the
+            // dominant hand (VrHookshot_RightLimbHand swaps the limbs); L_HAND takes the other.
+            s32 rightLimbVr = VrHookshot_RightLimbHand(this);
+            s32 vrHand = (limbIndex == PLAYER_LIMB_R_HAND) ? rightLimbVr : (rightLimbVr ^ 1);
+            // A physical dungeon key is held in a visibly closed fist. This changes only the
+            // first-person VR hand mesh; the key itself is drawn independently on the same hand.
+            if (VrKeys_HoldsHand(vrHand)) {
+                if (limbIndex == PLAYER_LIMB_L_HAND) {
+                    *dList = ResourceMgr_LoadGfxByName(
+                        gPlayerLeftHandClosedDLs[gSaveContext.linkAge + sDListsLodOffset]);
+                } else {
+                    *dList = ResourceMgr_LoadGfxByName(
+                        sPlayerRightHandClosedDLs[gSaveContext.linkAge + sDListsLodOffset]);
+                }
+            }
+            // Default (right-handed) maps each controller to Link's OPPOSITE-side hand model; the
+            // reflection that flips a mesh's handedness is per hand because it also mirrors held
+            // items' face designs — the sword survives that, but the shield's crest reads as
+            // upside-down, so mirroring is toggleable per hand. A limb on its own side's
+            // controller (left-handed mode, or the swapped hookshot) is never mirrored.
+            s32 limbSideVr = (limbIndex == PLAYER_LIMB_L_HAND) ? VR_HAND_LEFT : VR_HAND_RIGHT;
+            s32 mirror;
+            if (vrHand == limbSideVr) {
+                mirror = false;
+            } else if (limbIndex == PLAYER_LIMB_L_HAND) {
+                mirror = CVarGetInteger("gVrHandMirrorSword", 1);
+            } else {
+                mirror = CVarGetInteger("gVrHandMirrorShield", 1);
+            }
+            // Fold Link's model scale into the live hand matrix; SOH [VR] real-life hand scale
+            // resizes it so the hands (and every item drawn on them) keep one real size.
+            VR_SetHandScale(this->actor.scale.x * VrHand_ScaleFactor());
+            VR_SetHandMirror(vrHand, mirror);
+            MtxF handMtx;
+            if (VR_GetHandMatrix(vrHand, handMtx.mf)) {
+                // SOH [VR] Drawn Fairy Bow: the bow hand's matrix turns so the bow points along the
+                // string hand -> arrow rest line (VrArchery). It is then welded to the live hand
+                // as a CHILD (hand-local part vs. the raw pose) instead of being replaced by it.
+                MtxF vrRawHandMtx = handMtx;
+                // SOH [VR] Hands on a block (VrBlock): while attached by hand, the hand rides the
+                // block's face — drawn at the game rate with the block (normal frame interpolation),
+                // never substituted with the live controller.
+                // A hand latched on a silver boulder rides it the same way (VrCarry).
+                s32 vrPinned = VrBlock_PinnedHandMatrix(this, vrHand, &handMtx.mf[0][0]) ||
+                               VrCarry_PinnedHandMatrix(this, vrHand, &handMtx.mf[0][0]) ||
+                               VrDoor_PinnedHandMatrix(this, vrHand, &handMtx.mf[0][0]);
+                s32 vrBowAligned = !vrPinned && VrArchery_BowAlignedMatrix(vrHand, &handMtx.mf[0][0]);
+                // SOH [VR] Climbing (VrClimb): a holding hand is drawn on the surface where it took
+                // hold — a fixed offset from the controller, still live (welded as a child below).
+                f32 vrClimbSnap[3];
+                s32 vrClimbSnapped =
+                    !vrPinned && !vrBowAligned && VrClimb_HandSnapOffset(this, vrHand, vrClimbSnap);
+                if (vrClimbSnapped) {
+                    handMtx.mf[3][0] += vrClimbSnap[0];
+                    handMtx.mf[3][1] += vrClimbSnap[1];
+                    handMtx.mf[3][2] += vrClimbSnap[2];
+                }
+                Matrix_Put(&handMtx);
+                // Tag this limb's per-frame Mtx so the interpreter swaps in the LIVE controller pose
+                // per eye — the hand tracks at headset rate instead of the game-rate interpolation.
+                if (play->flexLimbOverrideMTX != NULL && !vrPinned) {
+                    if (vrBowAligned || vrClimbSnapped) {
+                        MtxF vrInv;
+                        MtxF vrLocal;
+                        SkinMatrix_Invert(&vrRawHandMtx, &vrInv);
+                        SkinMatrix_MtxFMtxFMult(&vrInv, &handMtx, &vrLocal);
+                        VR_RegisterHandChildMatrix((const void*)*play->flexLimbOverrideMTX, vrHand,
+                                                   &vrLocal.mf[0][0]);
+                    } else {
+                        VR_RegisterHandMatrix((const void*)*play->flexLimbOverrideMTX, vrHand);
+                    }
+                }
+                // Snapshot the 20 Hz pose this frame's derived matrices (bowstring) are built
+                // against, so their hand-LOCAL part can be extracted for live re-composition.
+                // (Not for a pinned hand: nothing may weld to the live controller through it.)
+                if (!vrPinned) {
+                    sVrHandLimbMtxF[vrHand] = vrRawHandMtx;
+                    sVrHandLimbFrame[vrHand] = (s32)play->state.frames;
+                }
+                pos->x = pos->y = pos->z = 0.0f;
+                rot->x = rot->y = rot->z = 0;
+                if (mirror) {
+                    // The reflection flips triangle winding; invert back-face culling so the hand + held
+                    // item don't render inside-out. Cleared on the next limb (top of this function).
+                    OPEN_DISPS(play->state.gfxCtx);
+                    gSPSetExtraGeometryMode(POLY_OPA_DISP++, G_EX_INVERT_CULLING);
+                    CLOSE_DISPS(play->state.gfxCtx);
+                    sVrHandInvertCulling = true;
+                }
+            }
+            return ret;
+        }
+    }
+    // #endregion
+
+    return ret;
 }
 
 s32 Player_OverrideLimbDrawGameplayCrawling(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot,
@@ -1527,15 +1775,31 @@ void Player_UpdateShieldCollider(PlayState* play, Player* this, ColliderQuad* co
         COLTYPE_METAL,
     };
 
-    if (this->stateFlags1 & PLAYER_STATE1_SHIELDING) {
+    // SOH [VR] Physical shield: the quad registers whenever the shield is physically in hand —
+    // its vertices come from this limb's matrix, which VR pins to the off-hand controller, so
+    // where the player holds the shield IS where it blocks (geometric truth, no stance).
+    if ((this->stateFlags1 & PLAYER_STATE1_SHIELDING) || VrCombat_ShieldHeld(this)) {
         Vec3f quadDest[4];
 
         this->shieldQuad.base.colType = shieldColTypes[this->currentShield];
 
-        Matrix_MultVec3f(&quadSrc[0], &quadDest[0]);
-        Matrix_MultVec3f(&quadSrc[1], &quadDest[1]);
-        Matrix_MultVec3f(&quadSrc[2], &quadDest[2]);
-        Matrix_MultVec3f(&quadSrc[3], &quadDest[3]);
+        // SOH [VR] Physical shield: the collider is fully parametric (Shield sliders —
+        // dimensions, trapezoid shape, placement, tilt) instead of the vanilla stance quad,
+        // whose 60x60 offset square never matched a controller-held shield. Hits outside the
+        // configured quad don't count — they land on whatever was behind it.
+        if (VrCombat_ShieldHeld(this)) {
+            Vec3f vrSrc[4];
+            VrCombat_ShieldQuadModelVerts((f32*)vrSrc);
+            Matrix_MultVec3f(&vrSrc[0], &quadDest[0]);
+            Matrix_MultVec3f(&vrSrc[1], &quadDest[1]);
+            Matrix_MultVec3f(&vrSrc[2], &quadDest[2]);
+            Matrix_MultVec3f(&vrSrc[3], &quadDest[3]);
+        } else {
+            Matrix_MultVec3f(&quadSrc[0], &quadDest[0]);
+            Matrix_MultVec3f(&quadSrc[1], &quadDest[1]);
+            Matrix_MultVec3f(&quadSrc[2], &quadDest[2]);
+            Matrix_MultVec3f(&quadSrc[3], &quadDest[3]);
+        }
         Collider_SetQuadVertices(collider, &quadDest[0], &quadDest[1], &quadDest[2], &quadDest[3]);
 
         CollisionCheck_SetAC(play, &play->colChkCtx, &collider->base);
@@ -1561,7 +1825,8 @@ void func_800906D4(PlayState* play, Player* this, Vec3f* newTipPos) {
     Matrix_MultVec3f(&D_801260A4[2], &newBasePos[2]);
 
     if (func_80090480(play, NULL, &this->meleeWeaponInfo[0], &newTipPos[0], &newBasePos[0]) &&
-        !(this->stateFlags1 & PLAYER_STATE1_SHIELDING)) {
+        !(this->stateFlags1 & PLAYER_STATE1_SHIELDING) &&
+        !CVarGetInteger(CVAR_ENHANCEMENT("DisableLinkSwordTrail"), 0)) {
         EffectBlure_AddVertex(Effect_GetByIndex(this->meleeWeaponEffectIndex), &this->meleeWeaponInfo[0].tip,
                               &this->meleeWeaponInfo[0].base);
     }
@@ -1594,21 +1859,28 @@ void Player_DrawGetItemIceTrap(PlayState* play, Player* this, Vec3f* refPos, s32
         } else if (iceTrapScale < 0.8f) {
             iceTrapScale += 0.2f;
         }
-        gSPSegment(POLY_XLU_DISP++, 0x08,
-                   Gfx_TwoTexScroll(play->state.gfxCtx, 0, 0, (0 - play->gameplayFrames) % 128, 32, 32, 1, 0,
-                                    (play->gameplayFrames * -2) % 128, 32, 32));
 
-        Matrix_Translate(0.0f, -40.0f, 0.0f, MTXMODE_APPLY);
-        Matrix_Scale(iceTrapScale, iceTrapScale, iceTrapScale, MTXMODE_APPLY);
-        gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
-        gDPSetEnvColor(POLY_XLU_DISP++, 0, 50, 100, 255);
-        gSPDisplayList(POLY_XLU_DISP++, gEffIceFragment3DL);
+        // Draw the ice only after a bit so it doesn't spoil the fact that it's a trap
+        if (iceTrapScale >= 0.01) {
+            gSPSegment(POLY_XLU_DISP++, 0x08,
+                       Gfx_TwoTexScrollEx(play->state.gfxCtx, 0, 0, (0 - play->gameplayFrames) % 128, 32, 32, 1, 0,
+                                          (play->gameplayFrames * -2) % 128, 32, 32, 0, -1, 0, -2));
 
-        // Reset matrix for the fake item model because we're animating the size of the ice block around it before this.
-        Matrix_Translate(refPos->x + (3.3f * Math_SinS(this->actor.shape.rot.y)), refPos->y + height,
-                         refPos->z + ((3.3f + (IREG(90) / 10.0f)) * Math_CosS(this->actor.shape.rot.y)), MTXMODE_NEW);
-        Matrix_RotateZYX(0, play->gameplayFrames * 1000, 0, MTXMODE_APPLY);
-        Matrix_Scale(0.2f, 0.2f, 0.2f, MTXMODE_APPLY);
+            Matrix_Translate(0.0f, -40.0f, 0.0f, MTXMODE_APPLY);
+            Matrix_Scale(iceTrapScale, iceTrapScale, iceTrapScale, MTXMODE_APPLY);
+            gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+            gDPSetEnvColor(POLY_XLU_DISP++, 0, 50, 100, 255);
+            gSPDisplayList(POLY_XLU_DISP++, gEffIceFragment3DL);
+
+            // Reset matrix for the fake item model because we're animating the size of the ice block around it before
+            // this.
+            Matrix_Translate(refPos->x + (3.3f * Math_SinS(this->actor.shape.rot.y)), refPos->y + height,
+                             refPos->z + ((3.3f + (IREG(90) / 10.0f)) * Math_CosS(this->actor.shape.rot.y)),
+                             MTXMODE_NEW);
+            Matrix_RotateZYX(0, play->gameplayFrames * 1000, 0, MTXMODE_APPLY);
+            Matrix_Scale(0.2f, 0.2f, 0.2f, MTXMODE_APPLY);
+        }
+
         // Draw fake item model.
         if (this->getItemEntry.drawFunc != NULL) {
             this->getItemEntry.drawFunc(play, &this->getItemEntry);
@@ -1622,6 +1894,18 @@ void Player_DrawGetItemIceTrap(PlayState* play, Player* this, Vec3f* refPos, s32
 
 void Player_DrawGetItemImpl(PlayState* play, Player* this, Vec3f* refPos, s32 drawIdPlusOne) {
     f32 height = (this->exchangeItemId != EXCH_ITEM_NONE) ? 6.0f : 14.0f;
+    // SOH [VR] First person: the held-up item is pushed further out from the hands so it isn't on
+    // top of your head. Rewrite the reference point so the vanilla placement below (and the
+    // ice-trap redraw) lands the item there; vanilla's 3.3-unit nudge is replaced, not added to.
+    Vec3f vrRefPos;
+    f32 vrHands[3] = { refPos->x, refPos->y, refPos->z };
+    f32 vrPos[3];
+    if (VrGetItem_HoldUpPos(play, this, vrHands, vrPos)) {
+        vrRefPos.x = vrPos[0] - (3.3f * Math_SinS(this->actor.shape.rot.y));
+        vrRefPos.y = vrPos[1];
+        vrRefPos.z = vrPos[2] - ((3.3f + (IREG(90) / 10.0f)) * Math_CosS(this->actor.shape.rot.y));
+        refPos = &vrRefPos;
+    }
 
     OPEN_DISPS(play->state.gfxCtx);
 
@@ -1637,7 +1921,8 @@ void Player_DrawGetItemImpl(PlayState* play, Player* this, Vec3f* refPos, s32 dr
 
     if (this->getItemEntry.modIndex == MOD_RANDOMIZER && this->getItemEntry.getItemId == RG_ICE_TRAP) {
         Player_DrawGetItemIceTrap(play, this, refPos, drawIdPlusOne, height);
-    } else if (this->getItemEntry.modIndex == MOD_RANDOMIZER && this->getItemEntry.getItemId == RG_TRIFORCE_PIECE) {
+    } else if (this->getItemEntry.modIndex == MOD_RANDOMIZER &&
+               (this->getItemEntry.getItemId == RG_TRIFORCE_PIECE || this->getItemEntry.getItemId == RG_TRIFORCE)) {
         Randomizer_DrawTriforcePieceGI(play, this->getItemEntry);
     } else if (this->getItemEntry.drawFunc != NULL) {
         this->getItemEntry.drawFunc(play, &this->getItemEntry);
@@ -1701,22 +1986,10 @@ void Player_DrawHookshotReticle(PlayState* play, Player* this, f32 hookshotRange
         Matrix_Scale(sp60, sp60, sp60, MTXMODE_APPLY);
 
         gSPMatrix(OVERLAY_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
-        gSPMatrix(OVERLAY_DISP++, SEG_ADDR(1, 0), G_MTX_NOPUSH | G_MTX_MUL | G_MTX_MODELVIEW);
-        gSPTexture(OVERLAY_DISP++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
-        gDPLoadTextureBlock(OVERLAY_DISP++, gLinkAdultHookshotReticleTex, G_IM_FMT_I, G_IM_SIZ_8b, 64, 64, 0,
-                            G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP, 6, 6, G_TX_NOLOD, G_TX_NOLOD);
-        if (SurfaceType_IsHookshotSurface(&play->colCtx, colPoly, bgId) &&
-            CVarGetInteger(CVAR_ENHANCEMENT("HookshotableReticle"), false)) {
-            const Color_RGBA8 defaultColor = { .r = 0, .g = 255, .b = 0, .a = 255 };
-            const Color_RGBA8 color = CVarGetColor(CVAR_COSMETIC("HookshotReticle.Target.Value"), defaultColor);
-            gDPSetPrimColor(OVERLAY_DISP++, 0, 0, color.r, color.g, color.b, color.a);
-        } else {
-            const Color_RGBA8 defaultColor = { .r = 255, .g = 0, .b = 0, .a = 255 };
-            const Color_RGBA8 color = CVarGetColor(CVAR_COSMETIC("HookshotReticle.NonTarget.Value"), defaultColor);
-            gDPSetPrimColor(OVERLAY_DISP++, 0, 0, color.r, color.g, color.b, color.a);
+        if (GameInteractor_Should(VB_TARGETABLE_HOOKSHOT_RETICLE, true, colPoly, bgId)) {
+            gSPSegment(OVERLAY_DISP++, 0x06, play->objectCtx.status[this->actor.objBankIndex].segment);
+            gSPDisplayList(OVERLAY_DISP++, gLinkAdultHookshotReticleDL);
         }
-        gSPVertex(OVERLAY_DISP++, (uintptr_t)gLinkAdultHookshotReticleVtx, 3, 0);
-        gSP1Triangle(OVERLAY_DISP++, 0, 1, 2, 0);
 
         CLOSE_DISPS(play->state.gfxCtx);
     }
@@ -1773,16 +2046,108 @@ Vec3f sLeftRightFootLimbModelFootPos[] = {
     { 200.0f, 200.0f, 0.0f },
 };
 
-// OTRTODO: Figure out why this value works/what this value should be
-// This was originally obtained by working down from FLT_MAX until the math
-// started working out properly
-#define RETICLE_MAX 3.402823466e+12f
+// SOH [VR] Motion aim — point the held projectile (nocked arrow/seed, hookshot hook) along the
+// weapon hand's aim ray. The held actor's world.pos/world.rot are recomputed from the animation-
+// driven limb matrix every draw frame and read verbatim by the flight code at release
+// (EnArrow_Shoot / ArmsHook_Wait -> Actor_SetProjectileSpeed uses world.rot.x, movement uses
+// world.rot.y), so overriding them here changes BOTH where the projectile sits while aiming and
+// where it flies when fired — no changes to the fire path itself. Runs after Z-target auto-aim's
+// influence (which writes the upstream focus.rot), so motion aim always wins the shot while
+// lock-on keeps steering the camera. The weapon (bow/slingshot/hookshot) models attach to Link's
+// RIGHT hand limb, which motion-hands maps to the player's LEFT controller in right-handed mode
+// (bow in left hand, draw with right) — so the aim ray comes from that controller. The hookshot
+// is the exception: it rides the dominant hand (VrHookshot_RightLimbHand), and aims from there.
+// Returns true when it overrode the actor's transform.
+static s32 Player_VrAimHeldProjectile(Player* this, Actor* heldActor) {
+    if (!(VR_IsInitialized() && (VR_GetFirstPerson() || VrArchery_Covers(this)) &&
+          CVarGetInteger("gVrMotionHands", 1) &&
+          CVarGetInteger("gVrWeaponAim", 1))) {
+        return false;
+    }
+    s32 vrWeaponHand = VrHookshot_RightLimbHand(this);
+    float vrRayPos[3];
+    float vrRayDir[3];
+    // SOH [VR] Physical archery: while a nock is pinched, the shot aims along the string-hand
+    // -> bow-hand line — real two-hand archery — instead of the bow hand's pointing ray. Same
+    // override mechanism either way; the flight code still reads world.rot verbatim at release.
+    float vrArcherySeg[6];
+    s16 vrRoll = 0;
+    if (VrArchery_AimSegment(vrArcherySeg)) {
+        vrRayPos[0] = vrArcherySeg[0];
+        vrRayPos[1] = vrArcherySeg[1];
+        vrRayPos[2] = vrArcherySeg[2];
+        vrRayDir[0] = vrArcherySeg[3];
+        vrRayDir[1] = vrArcherySeg[4];
+        vrRayDir[2] = vrArcherySeg[5];
+    } else if (Player_HoldsHookshot(this) && VrHookshot_BarrelAim()) {
+        // SOH [VR] Hookshot barrel aim: the caller just placed the hook with the vanilla in-hand
+        // transform (D_80126190 + the hook rotation) through the R_HAND limb matrix, which motion
+        // hands pins to the controller — i.e. seated in the hookshot model's barrel, pointing
+        // along it. That pose IS the aim; the roll is kept so the hook turns with the hookshot.
+        f32 vrCp = Math_CosS(heldActor->world.rot.x);
+        vrRayPos[0] = heldActor->world.pos.x;
+        vrRayPos[1] = heldActor->world.pos.y;
+        vrRayPos[2] = heldActor->world.pos.z;
+        vrRayDir[0] = vrCp * Math_SinS(heldActor->world.rot.y);
+        vrRayDir[1] = -Math_SinS(heldActor->world.rot.x);
+        vrRayDir[2] = vrCp * Math_CosS(heldActor->world.rot.y);
+        vrRoll = heldActor->world.rot.z;
+        VrHookshot_TrimAimRay(vrWeaponHand, vrRayPos, vrRayDir);
+    } else if (!VR_GetAimRay(vrWeaponHand, vrRayPos, vrRayDir)) {
+        return false;
+    } else if (Player_HoldsHookshot(this)) {
+        // SOH [VR] Hookshot-only aim trim (angle), on top of the shared trim.
+        VrHookshot_TrimAimRay(vrWeaponHand, vrRayPos, vrRayDir);
+    }
+    Vec3f vrOrigin = { vrRayPos[0], vrRayPos[1], vrRayPos[2] };
+    Vec3f vrTarget = { vrRayPos[0] + vrRayDir[0] * 100.0f, vrRayPos[1] + vrRayDir[1] * 100.0f,
+                       vrRayPos[2] + vrRayDir[2] * 100.0f };
+    heldActor->world.pos = vrOrigin;
+    heldActor->world.rot.x = Math_Vec3f_Pitch(&vrOrigin, &vrTarget);
+    heldActor->world.rot.y = Math_Vec3f_Yaw(&vrOrigin, &vrTarget);
+    heldActor->world.rot.z = vrRoll;
+    heldActor->shape.rot = heldActor->world.rot;
+    return true;
+}
+
+// SOH [VR] Put a matrix under Player_DrawHookshotReticle so its line test runs along the hook's
+// real flight line (from world.pos along world.rot, exactly what ArmsHook reads at the shot)
+// instead of the hand model's barrel. The reticle tests model points (-500, -100, 0..range) and
+// the range is in Link-scaled model units, so: axes = Link's scale x the flight frame, origin
+// shifted so the model point (-500, -100, 0) lands on the hook.
+static void Player_VrPutHookshotReticleFrame(Player* this, Actor* hook) {
+    MtxF mf;
+    f32 s = this->actor.scale.x;
+    f32 cp = Math_CosS(hook->world.rot.x);
+    f32 sp = Math_SinS(hook->world.rot.x);
+    f32 cy = Math_CosS(hook->world.rot.y);
+    f32 sy = Math_SinS(hook->world.rot.y);
+    Vec3f fwd = { cp * sy, -sp, cp * cy };
+    Vec3f right = { cy, 0.0f, -sy };
+    Vec3f up = { fwd.y * right.z - fwd.z * right.y, fwd.z * right.x - fwd.x * right.z,
+                 fwd.x * right.y - fwd.y * right.x };
+
+    mf.xx = right.x * s;
+    mf.yx = right.y * s;
+    mf.zx = right.z * s;
+    mf.wx = 0.0f;
+    mf.xy = up.x * s;
+    mf.yy = up.y * s;
+    mf.zy = up.z * s;
+    mf.wy = 0.0f;
+    mf.xz = fwd.x * s;
+    mf.yz = fwd.y * s;
+    mf.zz = fwd.z * s;
+    mf.wz = 0.0f;
+    mf.xw = hook->world.pos.x + (500.0f * right.x + 100.0f * up.x) * s;
+    mf.yw = hook->world.pos.y + (500.0f * right.y + 100.0f * up.y) * s;
+    mf.zw = hook->world.pos.z + (500.0f * right.z + 100.0f * up.z) * s;
+    mf.ww = 1.0f;
+    Matrix_Put(&mf);
+}
 
 void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Vec3s* rot, void* thisx) {
     Player* this = (Player*)thisx;
-
-    const Vec3s BoomerangViewAdult = { -31200, -9200, 17000 };
-    const Vec3s BoomerangViewChild = { -31200, -8700, 17000 };
 
     if (*dList != NULL) {
         Matrix_MultVec3f(&sZeroVec, D_80160000);
@@ -1802,7 +2167,14 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
             if (this->actor.scale.y >= 0.0f) {
                 D_80126080.x = this->unk_85C * 5000.0f;
                 func_80090A28(this, sp124);
-                if (this->meleeWeaponState != 0) {
+                if (VrCombat_Active() && VrCombat_MeleeCovered(this)) {
+                    // SOH [VR] Covered stick: the physical path owns the trail and damage quads
+                    // (FeedMelee), so the vanilla registration must not double them — but the
+                    // weapon-info tip stays live (torches and friends read it outside attacks).
+                    Math_Vec3f_Copy(&this->meleeWeaponInfo[0].tip, &sp124[0]);
+                    EffectBlure_ChangeType(Effect_GetByIndex(this->meleeWeaponEffectIndex), TRAIL_TYPE_STICK);
+                    VrCombat_FeedMelee(play, this);
+                } else if (this->meleeWeaponState != 0) {
                     EffectBlure_ChangeType(Effect_GetByIndex(this->meleeWeaponEffectIndex), TRAIL_TYPE_STICK);
                     func_800906D4(play, this, sp124);
                 } else {
@@ -1814,10 +2186,24 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
             Matrix_RotateZYX(-0x8000, 0, 0x4000, MTXMODE_APPLY);
             Matrix_Scale(1.0f, this->unk_85C, 1.0f, MTXMODE_APPLY);
 
-            gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+            // SOH [VR] Model only, welded to the live hand (the tip / fire logic above is untouched).
+            gSPMatrix(POLY_OPA_DISP++, Player_VrNewMtxOnSwordHand(play), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
             gSPDisplayList(POLY_OPA_DISP++, gLinkChildLinkDekuStickDL);
 
             CLOSE_DISPS(play->state.gfxCtx);
+        } else if ((this->actor.scale.y >= 0.0f) && VrCombat_Active() && VrCombat_MeleeCovered(this)) {
+            // SOH [VR] Physical combat: blade collision comes from the real swing path, velocity-
+            // gated, instead of attack-animation state. The hand limb matrix on the stack here IS
+            // the controller pose; VrCombat_FeedMelee builds its own blade geometry through it
+            // (per-weapon length CVars), measures swing speed over this tick's motion, mirrors
+            // meleeWeaponState for enemy AI, feeds the trail, and registers swept AT quads only
+            // while the swing is fast enough. Only the trail's visual type is set here.
+            if (!Player_HoldsBrokenKnife(this)) {
+                EffectBlure_ChangeType(Effect_GetByIndex(this->meleeWeaponEffectIndex),
+                                       sSwordTypes[Player_GetMeleeWeaponHeld(this)]);
+            }
+
+            VrCombat_FeedMelee(play, this);
         } else if ((this->actor.scale.y >= 0.0f) && (this->meleeWeaponState != 0)) {
             Vec3f spE4[3];
 
@@ -1836,9 +2222,12 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
 
             OPEN_DISPS(play->state.gfxCtx);
 
-            gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
-            gDPSetEnvColor(POLY_XLU_DISP++, bottleColor->r, bottleColor->g, bottleColor->b, 0);
-            gSPDisplayList(POLY_XLU_DISP++, sBottleDLists[(gSaveContext.linkAge)]);
+            // SOH [VR] Welded to the live hand like the fist holding it.
+            gSPMatrix(POLY_XLU_DISP++, Player_VrNewMtxOnSwordHand(play), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+            if (GameInteractor_Should(VB_PLAYER_DRAW_BOTTLE, true, this, play)) {
+                gDPSetEnvColor(POLY_XLU_DISP++, bottleColor->r, bottleColor->g, bottleColor->b, 0);
+                gSPDisplayList(POLY_XLU_DISP++, sBottleDLists[gSaveContext.linkAge]);
+            }
 
             CLOSE_DISPS(play->state.gfxCtx);
         }
@@ -1851,6 +2240,9 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
                     Matrix_Get(&sp14C);
                     Matrix_MtxFToYXZRotS(&sp14C, &hookedActor->world.rot, 0);
                     hookedActor->shape.rot = hookedActor->world.rot;
+                    // SOH [VR] Motion aim: the projectile spawns at and flies along the weapon
+                    // hand's aim ray (overrides the animation-driven transform just computed).
+                    Player_VrAimHeldProjectile(this, hookedActor);
                 } else if (this->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR) {
                     Vec3s spB8;
 
@@ -1887,7 +2279,15 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
             Matrix_Push();
             Matrix_Translate(stringData->pos.x, stringData->pos.y, stringData->pos.z, MTXMODE_APPLY);
 
-            if ((this->stateFlags1 & PLAYER_STATE1_READY_TO_FIRE) && (this->unk_860 >= 0) && (this->unk_834 <= 10)) {
+            // The gallery's stock aim state keeps the band visually pulled before physical
+            // archery has nocked it. Its real touch target is still the braced pouch, producing
+            // two different apparent nock points. Leave the gallery slingshot braced until the
+            // physical pouch transform below takes ownership.
+            s32 vrPhysicalGallerySling = stringData == &sBowStringData[1] && play->shootingGalleryStatus > 0 &&
+                                         VrArchery_Covers(this);
+
+            if (!vrPhysicalGallerySling && (this->stateFlags1 & PLAYER_STATE1_READY_TO_FIRE) &&
+                (this->unk_860 >= 0) && (this->unk_834 <= 10)) {
                 Vec3f sp90;
                 f32 distXYZ;
 
@@ -1907,13 +2307,90 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
                 this->unk_85C = -0.5f;
             }
 
-            Matrix_Scale(1.0f, this->unk_858, 1.0f, MTXMODE_APPLY);
+            {
+                // SOH [VR] Physical archery: the string renders pulled to the string hand —
+                // direction AND stretch follow it, so the string lines up with wherever you
+                // pull it. Both weapons use an exact linear map onto the nock (below), read
+                // off their own string DL's apex vertex: no calibration.
+                s32 vrStringDone = false;
+                float vrBowNock[3];
+                // SOH [VR] Fairy Bow: exact string. The bow string DL is two limb-tip vertices
+                // at y = 1 (x = +-1483) and an apex at (360, -1160, +-10) — the nocking point.
+                // A linear map that keeps X and Z and replaces the Y column with
+                // v = (360*X - nock) / 1160 sends the apex exactly onto the nock and leaves the
+                // tips on the bow, at any pull angle, with no calibration slider.
+                if (stringData == &sBowStringData[0] && VrArchery_BowStringNock(vrBowNock)) {
+                    MtxF vrCur;
+                    MtxF vrInv;
+                    MtxF vrShear;
+                    Vec3f vrNockWorld = { vrBowNock[0], vrBowNock[1], vrBowNock[2] };
+                    Vec3f vrNockLocal;
+                    Matrix_Get(&vrCur);
+                    SkinMatrix_Invert(&vrCur, &vrInv);
+                    SkinMatrix_Vec3fMtxFMultXYZ(&vrInv, &vrNockWorld, &vrNockLocal);
+                    SkinMatrix_Clear(&vrShear);
+                    vrShear.mf[1][0] = (360.0f - vrNockLocal.x) / 1160.0f;
+                    vrShear.mf[1][1] = -vrNockLocal.y / 1160.0f;
+                    vrShear.mf[1][2] = -vrNockLocal.z / 1160.0f;
+                    Matrix_Mult(&vrShear, MTXMODE_APPLY);
+                    this->unk_858 = CLAMP(-vrNockLocal.y / 1160.0f, 0.0f, 1.0f);
+                    this->unk_85C = -0.5f;
+                    vrStringDone = true;
+                }
+                // SOH [VR] Slingshot: exact band, the bow's map with the band DL's own apex.
+                // gLinkChildSlinghotStringDL has its two ends at the prong tips (y ~ 0,
+                // z = +-343) and the pouch apex at (-9.5, -1324.5, 55). Keeping X and Z and
+                // replacing the Y column with v = (pouch - (-9.5, 0, 55)) / -1324.5 sends the
+                // apex exactly onto the pouch point (the string hand, capped at max stretch)
+                // and leaves the ends on the prongs, at any pull angle and any world scale.
+                if (!vrStringDone && stringData == &sBowStringData[1] && VrArchery_SlingshotPouch(vrBowNock)) {
+                    MtxF vrCur;
+                    MtxF vrInv;
+                    MtxF vrShear;
+                    Vec3f vrPouchWorld = { vrBowNock[0], vrBowNock[1], vrBowNock[2] };
+                    Vec3f vrPouchLocal;
+                    Matrix_Get(&vrCur);
+                    SkinMatrix_Invert(&vrCur, &vrInv);
+                    SkinMatrix_Vec3fMtxFMultXYZ(&vrInv, &vrPouchWorld, &vrPouchLocal);
+                    SkinMatrix_Clear(&vrShear);
+                    vrShear.mf[1][0] = (-9.5f - vrPouchLocal.x) / 1324.5f;
+                    vrShear.mf[1][1] = -vrPouchLocal.y / 1324.5f;
+                    vrShear.mf[1][2] = (55.0f - vrPouchLocal.z) / 1324.5f;
+                    Matrix_Mult(&vrShear, MTXMODE_APPLY);
+                    // Keep the vanilla pull scalar coherent for anything else that reads it.
+                    this->unk_858 = CLAMP(-vrPouchLocal.y / 1324.5f, 0.0f, 1.0f);
+                    this->unk_85C = -0.5f;
+                    vrStringDone = true;
+                }
+                if (!vrStringDone) {
+                    Matrix_Scale(1.0f, vrPhysicalGallerySling ? 0.0f : this->unk_858, 1.0f, MTXMODE_APPLY);
 
-            if (!LINK_IS_ADULT) {
-                Matrix_RotateZ(this->unk_858 * -0.2f, MTXMODE_APPLY);
+                    if (!LINK_IS_ADULT) {
+                        Matrix_RotateZ(this->unk_858 * -0.2f, MTXMODE_APPLY);
+                    }
+                }
             }
 
-            gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+            {
+                // SOH [VR] The bow renders at headset rate (live hand-matrix substitution) but
+                // this string matrix bakes the 20 Hz hand pose, so the string visibly trailed
+                // the live bow. Register it as a live CHILD of the hand: extract the
+                // hand-LOCAL part against the same 20 Hz snapshot, and the interpreter
+                // re-composes (live hand pose) x (local) every frame — string welded to bow.
+                Mtx* vrStringMtx = MATRIX_NEWMTX(play->state.gfxCtx);
+                s32 vrStringHand = (CVarGetInteger("gVrLeftHanded", 0) ? VR_HAND_LEFT : VR_HAND_RIGHT) ^ 1;
+                if (VR_IsInitialized() && VR_GetFirstPerson() &&
+                    (sVrHandLimbFrame[vrStringHand] == (s32)play->state.frames)) {
+                    MtxF vrCur;
+                    MtxF vrInv;
+                    MtxF vrLocal;
+                    Matrix_Get(&vrCur);
+                    SkinMatrix_Invert(&sVrHandLimbMtxF[vrStringHand], &vrInv);
+                    SkinMatrix_MtxFMtxFMult(&vrInv, &vrCur, &vrLocal);
+                    VR_RegisterHandChildMatrix((const void*)vrStringMtx, vrStringHand, &vrLocal.mf[0][0]);
+                }
+                gSPMatrix(POLY_XLU_DISP++, vrStringMtx, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+            }
             gSPDisplayList(POLY_XLU_DISP++, stringData->dList);
 
             Matrix_Pop();
@@ -1925,7 +2402,10 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
         }
 
         if (this->actor.scale.y >= 0.0f) {
-            if ((this->heldItemAction == PLAYER_IA_HOOKSHOT) || (this->heldItemAction == PLAYER_IA_LONGSHOT)) {
+            if (GameInteractor_Should(VB_DRAW_ADDITIONAL_RETICLES,
+                                      (this->heldItemAction == PLAYER_IA_HOOKSHOT) ||
+                                          (this->heldItemAction == PLAYER_IA_LONGSHOT),
+                                      this)) {
                 Matrix_MultVec3f(&D_80126184, &this->unk_3C8);
 
                 if (heldActor != NULL) {
@@ -1937,50 +2417,32 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
                     Matrix_Get(&sp44);
                     Matrix_MtxFToYXZRotS(&sp44, &heldActor->world.rot, 0);
                     heldActor->shape.rot = heldActor->world.rot;
+                    // SOH [VR] Motion aim: the hookshot hook launches from and along the weapon
+                    // hand's aim ray (same override as arrows/seeds).
+                    s32 vrHookAimed = Player_VrAimHeldProjectile(this, heldActor) && Player_HoldsHookshot(this);
+                    f32 vrHookRange = ((this->heldItemAction == PLAYER_IA_HOOKSHOT) ? 38600.0f : 77600.0f) *
+                                      CVarGetFloat(CVAR_CHEAT("HookshotReachMultiplier"), 1.0f);
+                    if (vrHookAimed) {
+                        // SOH [VR] Hand the flight line to the laser (VrHookshot.cpp), with this
+                        // frame's hand snapshot so the beam can weld to the live hand.
+                        s32 vrHookHand = VrHookshot_RightLimbHand(this);
+                        VrHookshot_NoteAim(this, heldActor, vrHookHand,
+                                           (sVrHandLimbFrame[vrHookHand] == (s32)play->state.frames)
+                                               ? &sVrHandLimbMtxF[vrHookHand].mf[0][0]
+                                               : NULL,
+                                           vrHookRange * this->actor.scale.x);
+                    }
 
                     if (func_8002DD78(this) != 0) {
-                        Matrix_Translate(500.0f, 300.0f, 0.0f, MTXMODE_APPLY);
-                        Player_DrawHookshotReticle(
-                            play, this,
-                            ((this->heldItemAction == PLAYER_IA_HOOKSHOT) ? 38600.0f : 77600.0f) *
-                                CVarGetFloat(CVAR_CHEAT("HookshotReachMultiplier"), 1.0f));
+                        if (vrHookAimed) {
+                            // SOH [VR] The reticle traces the hook's real flight line.
+                            Player_VrPutHookshotReticleFrame(this, heldActor);
+                        } else {
+                            Matrix_Translate(500.0f, 300.0f, 0.0f, MTXMODE_APPLY);
+                        }
+                        Player_DrawHookshotReticle(play, this, vrHookRange);
                     }
                 }
-
-                // #region SOH [Enhancement]
-            } else if (CVarGetInteger(CVAR_ENHANCEMENT("BowReticle"), 0) &&
-                       ((this->heldItemAction == PLAYER_IA_BOW_FIRE) || (this->heldItemAction == PLAYER_IA_BOW_ICE) ||
-                        (this->heldItemAction == PLAYER_IA_BOW_LIGHT) || (this->heldItemAction == PLAYER_IA_BOW) ||
-                        (this->heldItemAction == PLAYER_IA_SLINGSHOT))) {
-                if (heldActor != NULL) {
-                    MtxF sp44;
-                    s32 pad;
-
-                    Matrix_RotateZYX(0, -15216, -17496, MTXMODE_APPLY);
-                    Matrix_Get(&sp44);
-
-                    if (func_8002DD78(this) != 0) {
-                        Matrix_Translate(500.0f, 300.0f, 0.0f, MTXMODE_APPLY);
-                        Player_DrawHookshotReticle(play, this, RETICLE_MAX);
-                    }
-                }
-            } else if (CVarGetInteger(CVAR_ENHANCEMENT("BoomerangReticle"), 0) &&
-                       (this->heldItemAction == PLAYER_IA_BOOMERANG)) {
-                if (Player_HoldsBoomerang(this)) {
-                    if (LINK_IS_ADULT) {
-                        Matrix_RotateZYX(BoomerangViewAdult.x, BoomerangViewAdult.y, BoomerangViewAdult.z,
-                                         MTXMODE_APPLY);
-                    } else {
-                        Matrix_RotateZYX(BoomerangViewChild.x, BoomerangViewChild.y, BoomerangViewChild.z,
-                                         MTXMODE_APPLY);
-                    }
-
-                    if (Player_AimsBoomerang(this)) {
-                        Matrix_Translate(500.0f, 300.0f, 0.0f, MTXMODE_APPLY);
-                        Player_DrawHookshotReticle(play, this, RETICLE_MAX);
-                    }
-                }
-                // #endregion
             }
 
             if ((this->unk_862 != 0) || ((func_8002DD6C(this) == 0) && (heldActor != NULL))) {
@@ -1995,6 +2457,11 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
 
                 if (this->unk_862 == 0) {
                     Math_Vec3f_Copy(&heldActor->world.pos, &sGetItemRefPos);
+                    // SOH [VR] Physical carry uses one controller, not the midpoint of
+                    // Link's animation-driven hands. Keep this after vanilla placement.
+                    VrItemThrow_UpdateCarryPose(this);
+                    // SOH [VR] Physically carried pots / rocks / bushes / cuccos...: held as grabbed.
+                    VrCarry_UpdateCarryPose(this);
                 }
             }
         }
@@ -2101,6 +2568,8 @@ s32 Player_OverrideLimbDrawPause(PlayState* play, s32 limbIndex, Gfx** dList, Ve
 
     dLists = &sPlayerDListGroups[type][gSaveContext.linkAge];
     *dList = dLists[dListOffset];
+
+    GameInteractor_Should(VB_PLAYER_OVERRIDE_LIMB_DRAW_PAUSE, true, limbIndex, dList, GET_PLAYER(play), play);
 
     return 0;
 }
@@ -2256,18 +2725,13 @@ void Player_DrawPauseImpl(PlayState* play, void* gameplayKeep, void* linkObject,
     CLOSE_DISPS(play->state.gfxCtx);
 }
 
-void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f* pos, Vec3s* rot, f32 scale, s32 sword,
-                      s32 tunic, s32 shield, s32 boots) {
-    Input* p1Input = &play->state.input[0];
-    Vec3f eye = { 0.0f, 0.0f, -400.0f };
-    Vec3f at = { 0.0f, 0.0f, 0.0f };
+// Poses the pause skeleton for this frame: the animated pause Link (advances its animation), or the
+// static pause joint table for the current age / sword / shield. sword/shield may be cleared (the
+// Triforce pose holds neither); at is the pause camera's look-at, raised for the animated child.
+static void Player_PosePauseSkeleton(PlayState* play, SkelAnime* skelAnime, s32* sword, s32* shield, Vec3f* at) {
     Vec3s* destTable;
     Vec3s* srcTable;
     s32 i;
-    bool canswitchrnd = false;
-
-    gSegments[4] = VIRTUAL_TO_PHYSICAL(segment + 0x3800);
-    gSegments[6] = VIRTUAL_TO_PHYSICAL(segment + 0x8800);
 
     uintptr_t* PauseMenuAnimSet[4] = { // IDLE                       // Two Handed                       // No shield //
                                        // Kid Hylian Shield
@@ -2295,8 +2759,8 @@ void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f*
             anim = PauseMenuAnimSet[EquipedStance];
         } else {
             anim = gPlayerAnim_link_magic_kaze2;
-            sword = 0;
-            shield = 0;
+            *sword = 0;
+            *shield = 0;
         }
 
         if (skelAnime->animation != anim) {
@@ -2307,20 +2771,20 @@ void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f*
 
         if (!LINK_IS_ADULT) {
             // Link is placed too far up by default when animating
-            at.y += 60;
+            at->y += 60;
         }
     } else {
 
         if (!LINK_IS_ADULT) {
-            if (shield == PLAYER_SHIELD_DEKU) {
+            if (*shield == PLAYER_SHIELD_DEKU) {
                 srcTable = gLinkPauseChildDekuShieldJointTable;
             } else {
                 srcTable = gLinkPauseChildJointTable;
             }
         } else {
-            if (sword == PLAYER_SWORD_BIGGORON) {
+            if (*sword == PLAYER_SWORD_BIGGORON) {
                 srcTable = gLinkPauseAdultBgsJointTable;
-            } else if (shield != PLAYER_SHIELD_NONE) {
+            } else if (*shield != PLAYER_SHIELD_NONE) {
                 srcTable = gLinkPauseAdultShieldJointTable;
             } else {
                 srcTable = gLinkPauseAdultJointTable;
@@ -2335,9 +2799,172 @@ void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f*
         }
         free(ogSrcTable);
     }
+}
+
+void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f* pos, Vec3s* rot, f32 scale, s32 sword,
+                      s32 tunic, s32 shield, s32 boots) {
+    Vec3f eye = { 0.0f, 0.0f, -400.0f };
+    Vec3f at = { 0.0f, 0.0f, 0.0f };
+
+    gSegments[4] = VIRTUAL_TO_PHYSICAL(segment + 0x3800);
+    gSegments[6] = VIRTUAL_TO_PHYSICAL(segment + 0x8800);
+
+    Player_PosePauseSkeleton(play, skelAnime, &sword, &shield, &at);
 
     Player_DrawPauseImpl(play, segment + 0x3800, segment + 0x8800, skelAnime, pos, rot, scale, sword, tunic, shield,
                          boots, PAUSE_EQUIP_PLAYER_WIDTH, PAUSE_EQUIP_PLAYER_HEIGHT, &eye, &at, 60.0f,
                          play->state.gfxCtx->curFrameBuffer,
                          play->state.gfxCtx->curFrameBuffer + (PAUSE_EQUIP_PLAYER_WIDTH * PAUSE_EQUIP_PLAYER_HEIGHT));
+}
+
+// Placement of the pause camera's framing on the equipment page (current matrix = the page's):
+// the image rectangle's bottom center, the size multiplier about it, the camera-view-to-page turn,
+// and the camera's view axis at Link's depth onto the rectangle's center.
+static void Player_ApplyPauseInWorldPlacement(f32 rectCenterX, f32 rectCenterY, f32 rectHeight, f32 sizeMul,
+                                              f32 standOut, f32 k, f32 axisY, f32 depthZ) {
+    Matrix_Translate(rectCenterX, rectCenterY - (rectHeight * 0.5f), standOut, MTXMODE_APPLY);
+    Matrix_Scale(sizeMul, sizeMul, sizeMul, MTXMODE_APPLY);
+    Matrix_Translate(0.0f, rectHeight * 0.5f, 0.0f, MTXMODE_APPLY);
+    Matrix_Scale(k, k, k, MTXMODE_APPLY);
+    Matrix_RotateY(M_PI, MTXMODE_APPLY);
+    Matrix_Translate(0.0f, -axisY, -depthZ, MTXMODE_APPLY);
+}
+
+// SOH [VR] The world-space pause menu's equipment Link: the same posed skeleton and Player_DrawImpl
+// call as Player_DrawPause, drawn into the world on the page instead of through the pause camera into
+// a 64x112 offscreen image. The current matrix must be the equipment page's (the menu draws its pages
+// with world-space modelviews, VrPause.cpp). The pause camera's framing is mapped onto the image
+// rectangle exactly: the camera looks down +Z from (0, 0, -400) at Link's depth d = pos.z + 400 with a
+// 60 degree fovy, so the rectangle's height spans 2 d tan(30) render units there; RotateY(180) turns
+// the camera's view (screen right = -X, toward the camera = -Z) into the page's (+X right, +Z toward
+// the viewer). sizeMul scales about the rectangle's bottom (his feet stay put); standOut lifts him off
+// the page so he stands in front of it. Before him, the eye's depth is cleared (a full-screen Z fill,
+// honored mid-list by the stereo interpreter): the pages draw without Z, so this way he is occluded
+// only by himself, never by a wall nearer than the page. The pause light is carried into world space
+// with the placement, so he is lit as in the menu whichever way the player faced when pausing.
+void Player_DrawPauseInWorld(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f* pos, Vec3s* rot, f32 scale,
+                             s32 sword, s32 tunic, s32 shield, s32 boots, f32 rectCenterX, f32 rectCenterY,
+                             f32 rectHeight, f32 sizeMul, f32 standOut) {
+    static Vec3f sLightDirRender = { 84.0f, 84.0f, -84.0f }; // Player_DrawPauseImpl's lights1 direction
+    static Vec3f sHiliteDirRender = { 89.8f, 0.0f, 89.8f };  // Player_DrawPauseImpl's hilite direction
+    static Vec3f sZero = { 0.0f, 0.0f, 0.0f };
+    GraphicsContext* gfxCtx = play->state.gfxCtx;
+    Vec3f eye = { 0.0f, 0.0f, -400.0f };
+    Vec3f at = { 0.0f, 0.0f, 0.0f };
+    u8 mirrorWorldActive = CVarGetInteger(CVAR_ENHANCEMENT("MirroredWorld"), 0);
+    u8 animatedAdult =
+        CVarGetInteger(CVAR_ENHANCEMENT("PauseMenuAnimatedLink"), 0) && LINK_AGE_IN_YEARS == YEARS_ADULT;
+    u8 triforce = CVarGetInteger(CVAR_GENERAL("PauseMenuAnimatedLinkTriforce"), 0);
+    u8 playerSwordAndShield[2];
+    Vec3f linkRender;
+    Vec3f worldOrigin;
+    Vec3f worldLink;
+    Vec3f worldTip;
+    Vec3f worldLight;
+    Vec3f worldHilite;
+    Lights1* lights;
+    f32 depth;
+    f32 k;
+    f32 axisY;
+    f32 len;
+
+    gSegments[4] = VIRTUAL_TO_PHYSICAL(segment + 0x3800);
+    gSegments[6] = VIRTUAL_TO_PHYSICAL(segment + 0x8800);
+
+    Player_PosePauseSkeleton(play, skelAnime, &sword, &shield, &at);
+
+    depth = pos->z - eye.z;
+    k = rectHeight / (2.0f * depth * tanf(DEG_TO_RAD(60.0f) * 0.5f));
+    axisY = at.y * depth / -eye.z;
+    linkRender.x = pos->x - (animatedAdult ? 25 : 0);
+    linkRender.y = pos->y - (triforce ? 16 : 0);
+    linkRender.z = pos->z;
+
+    Matrix_Push();
+    Player_ApplyPauseInWorldPlacement(rectCenterX, rectCenterY, rectHeight, sizeMul, standOut, k, axisY, pos->z);
+
+    // Render-space directions into world space through the placement (its translation cancels).
+    Matrix_MultVec3f(&sZero, &worldOrigin);
+    Matrix_MultVec3f(&linkRender, &worldLink);
+    Matrix_MultVec3f(&sLightDirRender, &worldTip);
+    worldLight.x = worldTip.x - worldOrigin.x;
+    worldLight.y = worldTip.y - worldOrigin.y;
+    worldLight.z = worldTip.z - worldOrigin.z;
+    len = sqrtf(SQ(worldLight.x) + SQ(worldLight.y) + SQ(worldLight.z));
+    if (len > 0.0f) {
+        worldLight.x *= 120.0f / len;
+        worldLight.y *= 120.0f / len;
+        worldLight.z *= 120.0f / len;
+    }
+    Matrix_MultVec3f(&sHiliteDirRender, &worldTip);
+    worldHilite.x = worldTip.x - worldOrigin.x;
+    worldHilite.y = worldTip.y - worldOrigin.y;
+    worldHilite.z = worldTip.z - worldOrigin.z;
+
+    lights = Graph_Alloc(gfxCtx, sizeof(Lights1));
+    *lights = (Lights1)gdSPDefLights1(80, 80, 80, 255, 255, 255, (s8)worldLight.x, (s8)worldLight.y,
+                                      (s8)worldLight.z);
+
+    OPEN_DISPS(gfxCtx);
+
+    // Depth reset for this eye (see above), then back to the frame's color image.
+    gDPPipeSync(POLY_OPA_DISP++);
+    gDPSetColorImage(POLY_OPA_DISP++, G_IM_FMT_RGBA, G_IM_SIZ_16b, SCREEN_WIDTH, gZBuffer);
+    gDPSetCycleType(POLY_OPA_DISP++, G_CYC_FILL);
+    gDPSetRenderMode(POLY_OPA_DISP++, G_RM_NOOP, G_RM_NOOP2);
+    gDPSetFillColor(POLY_OPA_DISP++, (GPACK_ZDZ(G_MAXFBZ, 0) << 16) | GPACK_ZDZ(G_MAXFBZ, 0));
+    gDPFillRectangle(POLY_OPA_DISP++, 0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1);
+    gDPPipeSync(POLY_OPA_DISP++);
+    gDPSetColorImage(POLY_OPA_DISP++, G_IM_FMT_RGBA, G_IM_SIZ_16b, SCREEN_WIDTH, gfxCtx->curFrameBuffer);
+
+    if (mirrorWorldActive) {
+        gSPSetExtraGeometryMode(POLY_OPA_DISP++, G_EX_INVERT_CULLING);
+        gSPSetExtraGeometryMode(POLY_XLU_DISP++, G_EX_INVERT_CULLING);
+    }
+
+    playerSwordAndShield[0] = sword;
+    playerSwordAndShield[1] = shield;
+
+    Matrix_Translate(linkRender.x, linkRender.y, linkRender.z, MTXMODE_APPLY);
+    Matrix_RotateZYX(rot->x, rot->y, rot->z, MTXMODE_APPLY);
+    Matrix_Scale(scale * (mirrorWorldActive ? -1 : 1), scale, scale, MTXMODE_APPLY);
+
+    gSPSegment(POLY_OPA_DISP++, 0x04, segment + 0x3800);
+    gSPSegment(POLY_OPA_DISP++, 0x06, segment + 0x8800);
+
+    gSPSetLights1(POLY_OPA_DISP++, (*lights));
+
+    func_80093C80(play);
+
+    POLY_OPA_DISP = Gfx_SetFog2(POLY_OPA_DISP, 0, 0, 0, 0, 997, 1000);
+
+    func_8002EABC(&worldLink, &play->view.eye, &worldHilite, gfxCtx);
+
+    gSPSegment(POLY_OPA_DISP++, 0x0C, gCullBackDList);
+
+    Player_DrawImpl(play, skelAnime->skeleton, skelAnime->jointTable, skelAnime->dListCount, 0, tunic, boots, 0,
+                    Player_OverrideLimbDrawPause, NULL, &playerSwordAndShield);
+
+    Matrix_Pop();
+
+    if (triforce) {
+        Matrix_Push();
+        Player_ApplyPauseInWorldPlacement(rectCenterX, rectCenterY, rectHeight, sizeMul, standOut, k, axisY, pos->z);
+        Matrix_Translate(pos->x - (LINK_AGE_IN_YEARS == YEARS_ADULT ? 25 : 0),
+                         pos->y + 280 + (LINK_AGE_IN_YEARS == YEARS_ADULT ? 48 : 0), pos->z, MTXMODE_APPLY);
+        Matrix_RotateZYX(rot->x, rot->y, rot->z, MTXMODE_APPLY);
+        Matrix_Scale(scale * (mirrorWorldActive ? -1 : 1), scale, scale, MTXMODE_APPLY);
+        Pause_DrawTriforceSpot(play, 1);
+        Matrix_Pop();
+    }
+
+    if (mirrorWorldActive) {
+        gSPClearExtraGeometryMode(POLY_OPA_DISP++, G_EX_INVERT_CULLING);
+        gSPClearExtraGeometryMode(POLY_XLU_DISP++, G_EX_INVERT_CULLING);
+    }
+
+    // Link loaded his own modelviews; the rest of the page draws under the page matrix again.
+    gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+
+    CLOSE_DISPS(gfxCtx);
 }

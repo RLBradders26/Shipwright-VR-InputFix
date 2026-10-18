@@ -1,4 +1,5 @@
 #include "spdlog/spdlog.h"
+#include <tinyxml2.h>
 #include "soh/resource/type/SohResourceType.h"
 #include "soh/resource/importer/SceneFactory.h"
 #include "soh/resource/type/Scene.h"
@@ -73,7 +74,7 @@ ResourceFactoryBinarySceneV0::ParseSceneCommand(std::shared_ptr<Scene> scene,
                                                 std::shared_ptr<Ship::BinaryReader> reader, uint32_t index) {
     SceneCommandID cmdID = (SceneCommandID)reader->ReadInt32();
 
-    reader->Seek(-sizeof(int32_t), Ship::SeekOffsetType::Current);
+    reader->Seek(-4, Ship::SeekOffsetType::Current);
 
     std::shared_ptr<ISceneCommand> result = nullptr;
     auto commandFactory = ResourceFactoryBinarySceneV0::sceneCommandFactories[cmdID];

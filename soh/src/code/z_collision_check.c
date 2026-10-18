@@ -2,6 +2,7 @@
 #include "vt.h"
 #include "overlays/effects/ovl_Effect_Ss_HitMark/z_eff_ss_hitmark.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 #include <assert.h>
 
 typedef s32 (*ColChkResetFunc)(PlayState*, Collider*);
@@ -1723,6 +1724,14 @@ void CollisionCheck_SetBounce(Collider* at, Collider* ac) {
  */
 s32 CollisionCheck_SetATvsAC(PlayState* play, Collider* at, ColliderInfo* atInfo, Vec3f* atPos, Collider* ac,
                              ColliderInfo* acInfo, Vec3f* acPos, Vec3f* hitPos) {
+    // SOH [VR] Physical shield facing gate: an attack touching the shield quad from outside
+    // its facing cone is ignored ENTIRELY at the source — no bounce, no enemy recoil, no
+    // flags. The attack keeps flying as if the shield weren't there and may go on to hit the
+    // body. (Judging later, in the player's damage handler, was too late: the AC_HARD bounce
+    // here is what actually cancels an enemy's attack, from any angle.)
+    if (VrCombat_ShieldFacingVeto(ac, at)) {
+        return 0;
+    }
     if (ac->acFlags & AC_HARD && at->actor != NULL && ac->actor != NULL) {
         CollisionCheck_SetBounce(at, ac);
     }
@@ -2707,6 +2716,9 @@ void CollisionCheck_SetOCvsOC(Collider* left, ColliderInfo* leftInfo, Vec3f* lef
     if (leftActor == NULL || rightActor == NULL || left->ocFlags1 & OC1_NO_PUSH || right->ocFlags1 & OC1_NO_PUSH) {
         return;
     }
+    // SOH [VR] Small body collider: remember both displacements, to report the player's share below.
+    Vec3f vrLeftBefore = leftActor->colChkInfo.displacement;
+    Vec3f vrRightBefore = rightActor->colChkInfo.displacement;
     rightMassType = CollisionCheck_GetMassType(leftActor->colChkInfo.mass);
     leftMassType = CollisionCheck_GetMassType(rightActor->colChkInfo.mass);
     leftMass = leftActor->colChkInfo.mass;
@@ -2763,6 +2775,13 @@ void CollisionCheck_SetOCvsOC(Collider* left, ColliderInfo* leftInfo, Vec3f* lef
         leftActor->colChkInfo.displacement.x -= leftDispRatio;
         rightActor->colChkInfo.displacement.x += rightDispRatio;
     }
+    // SOH [VR] Small body collider (VrBody): a static object (pot, rock, torch, boulder, sign...) pushing
+    // Link's body is fed to the view, and its contact distance (centre distance + overlap) is remembered
+    // so his physical lean never carries the body into it.
+    VrBody_NoteObjectPush(rightActor, leftActor, leftActor->colChkInfo.displacement.x - vrLeftBefore.x,
+                          leftActor->colChkInfo.displacement.z - vrLeftBefore.z, &rightPos->x, xzDist + overlap);
+    VrBody_NoteObjectPush(leftActor, rightActor, rightActor->colChkInfo.displacement.x - vrRightBefore.x,
+                          rightActor->colChkInfo.displacement.z - vrRightBefore.z, &leftPos->x, xzDist + overlap);
 }
 
 /**

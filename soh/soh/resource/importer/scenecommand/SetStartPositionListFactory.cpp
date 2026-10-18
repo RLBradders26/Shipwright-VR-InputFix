@@ -2,6 +2,7 @@
 #include "soh/resource/type/scenecommand/SetStartPositionList.h"
 #include "soh/resource/logging/SceneCommandLoggers.h"
 #include "spdlog/spdlog.h"
+#include <tinyxml2.h>
 
 namespace SOH {
 std::shared_ptr<Ship::IResource>
@@ -62,7 +63,7 @@ SetStartPositionListFactoryXML::ReadResource(std::shared_ptr<Ship::ResourceInitD
         child = child->NextSiblingElement();
     }
 
-    setStartPositionList->numStartPositions = setStartPositionList->startPositions.size();
+    setStartPositionList->numStartPositions = static_cast<u32>(setStartPositionList->startPositions.size());
 
     return setStartPositionList;
 }

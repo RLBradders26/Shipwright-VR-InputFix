@@ -379,6 +379,8 @@ void FileChoose_DrawNameEntry(GameState* thisx) {
                         this->configMode = CM_NAME_ENTRY_TO_QUEST_MENU;
                     } else if (this->prevConfigMode == CM_RANDOMIZER_SETTINGS_MENU) {
                         this->configMode = CM_NAME_ENTRY_TO_RANDOMIZER_SETTINGS_MENU;
+                    } else if (this->prevConfigMode = CM_ARCHIPELAGO_SETTINGS_MENU) {
+                        this->configMode = CM_NAME_ENTRY_TO_ARCHIPELAGO_SETTINGS_MENU;
                     } else {
                         this->configMode = CM_NAME_ENTRY_TO_MAIN;
                     }
@@ -465,7 +467,7 @@ void FileChoose_DrawNameEntry(GameState* thisx) {
                             CVarSetInteger(CVAR_GENERAL("OnFileSelectNameEntry"), 0);
                             this->nameBoxAlpha[this->buttonIndex] = this->nameAlpha[this->buttonIndex] = 200;
                             this->connectorAlpha[this->buttonIndex] = 255;
-                            func_800AA000(300.0f, 0xB4, 0x14, 0x64);
+                            Rumble_Request(300.0f, 0xB4, 0x14, 0x64);
                         } else {
                             Audio_PlaySoundGeneral(NA_SE_SY_FSEL_ERROR, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale,
                                                    &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
@@ -714,7 +716,7 @@ void FileChoose_UpdateOptionsMenu(GameState* thisx) {
         osSyncPrintf("Na_SetSoundOutputMode = %d\n", gSaveContext.audioSetting);
         osSyncPrintf("Na_SetSoundOutputMode = %d\n", gSaveContext.audioSetting);
         osSyncPrintf(VT_RST);
-        func_800F6700(gSaveContext.audioSetting);
+        Audio_SetSoundOutputMode(gSaveContext.audioSetting);
         osSyncPrintf("終了\n");
         return;
     }

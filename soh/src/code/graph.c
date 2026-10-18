@@ -6,9 +6,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <libultraship/bridge/gfxdebuggerbridge.h>
+#include <libultraship/bridge/windowbridge.h>
 #include "soh/Enhancements/gameconsole.h"
 #include "soh/OTRGlobals.h"
-#include "libultraship/bridge.h"
+#include <vr_interface.h>
+#include "soh/Enhancements/vr-combat/VrCombat.h"
+#include <libultraship/log/luslog.h>
 
 #define GFXPOOL_HEAD_MAGIC 0x1234
 #define GFXPOOL_TAIL_MAGIC 0x5678
@@ -281,6 +285,11 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
         return;
     }
 
+    // SOH [VR] Latch any pending VR<->flat toggle here — the tick boundary, BEFORE this tick's
+    // display list is built — so the DL's mode (overlay routing, camera, projections) always
+    // matches the mode it will be rendered in.
+    VR_ApplyModeRequest();
+
     gameState->unk_A0 = 0;
     Graph_InitTHGA(gfxCtx);
 
@@ -294,7 +303,11 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
     CLOSE_DISPS(gfxCtx);
 
     GameState_ReqPadData(gameState);
+    // SOH [VR] Bracketed for the VR performance readout: this runs on the render thread, so its
+    // cost is subtracted from the same 50 ms budget the tick's interpolated sub-frames share.
+    VR_GameTickBegin();
     GameState_Update(gameState);
+    VR_GameTickEnd();
 
     OPEN_DISPS(gfxCtx);
 
@@ -309,7 +322,65 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
 
     gSPBranchList(WORK_DISP++, gfxCtx->polyOpaBuffer);
     gSPBranchList(POLY_OPA_DISP++, gfxCtx->polyXluBuffer);
-    gSPBranchList(POLY_XLU_DISP++, gfxCtx->overlayBuffer);
+    // SOH [VR] Overlay routing. During gameplay the overlay display list (HUD, text) renders on
+    // the VR HUD quad (head-locked or hand-attached). In FLAT-SCREEN contexts — no PlayState
+    // (file select, title) or the pause menu — the overlay carries the whole 2D interface (kaleido
+    // inventory pages AND the pause background-capture command), which must render into the
+    // floating panel as one image, NOT onto the HUD quad: with the HUD pinned to a hand, the
+    // inventory would end up on the player's wrist while the panel stays black.
+    // The world-space pause menu (VrPause.cpp) is the exception: the frozen world keeps rendering
+    // in stereo and the kaleido pages are drawn into it, so that pause is NOT a flat context.
+    // Text boxes are the exception to "overlay = HUD quad": outside flat contexts the message
+    // system's list moves to its own soft-follow panel (Message_VrRouteText, z_message_PAL.c).
+    if (VR_IsInitialized()) {
+        extern PlayState* gPlayState;
+        extern void Message_VrRouteText(s32 toPanel);
+        s32 vrPauseWorldSpace = VrPause_FrameSync();
+        // The world-space file select (VrFileSelect.cpp) is the other exception: its sky and menu
+        // window render in stereo. After VrPause_FrameSync: both write the turn-suppression flag.
+        s32 vrFileSelectWorldSpace = VrFileSelect_FrameSync();
+        // The world-space N64 logo screen (VrLogo.cpp), the same way.
+        s32 vrLogoWorldSpace = VrLogo_FrameSync();
+        // Screen-space texture rectangles go onto a world panel only for whoever published one this
+        // frame (file select, logo, the world-space game over); everyone else gets them full-eye.
+        if (!vrFileSelectWorldSpace && !vrLogoWorldSpace && !VrPause_GameOverRects()) {
+            VR_SetRectWorldPanel(0, NULL);
+        }
+        // SOH [VR] Physical climbing: the view is locked to the gripping hand — an artificial turn
+        // would swing the playspace around the hand mid-pull (VrClimb.cpp). Also drops the lock
+        // whenever the player isn't ticking (pause, transitions).
+        if (VrClimb_FrameSync()) {
+            VR_SetTurnSuppressed(1);
+        }
+        s32 vrFlatScreen = (gPlayState == NULL) ? !(vrFileSelectWorldSpace || vrLogoWorldSpace)
+                                                : (gPlayState->pauseCtx.state != 0 && !vrPauseWorldSpace);
+        VR_SetFlatScreen(vrFlatScreen);
+        Message_VrRouteText(!vrFlatScreen);
+        // The title screen (the opening's logo, "PRESS START" and copyright, En_Mag) is overlay
+        // drawing with no HUD element tags, so the wrist HUD dropped it. Its whole overlay goes on
+        // the text panel instead: floating in front of the player and soft-following the head, sized
+        // for the logo (gVrTitleLogoWidth / Distance / Height, metres).
+        s32 vrTitlePanel = !vrFlatScreen && (gPlayState != NULL) &&
+                           (gSaveContext.gameMode == GAMEMODE_TITLE_SCREEN) && CVarGetInteger("gVrTitleLogoPanel", 1);
+        if (vrTitlePanel) {
+            VR_SetTextDisplayList(gfxCtx->overlayBuffer, 0.0f, 0.0f, 1.0f, 1.0f);
+            VR_SetTextPanelLayout(CVarGetFloat("gVrTitleLogoWidth", 1.8f), CVarGetFloat("gVrTitleLogoDistance", 2.2f),
+                                  CVarGetFloat("gVrTitleLogoHeight", 0.0f));
+        } else {
+            VR_SetTextPanelLayout(0.0f, 0.0f, 0.0f);
+        }
+        if (vrFlatScreen) {
+            gSPBranchList(POLY_XLU_DISP++, gfxCtx->overlayBuffer);
+            VR_SetOverlayDisplayList(NULL);
+        } else {
+            gDPPipeSync(POLY_XLU_DISP++);
+            gDPFullSync(POLY_XLU_DISP++);
+            gSPEndDisplayList(POLY_XLU_DISP++);
+            VR_SetOverlayDisplayList(vrTitlePanel ? NULL : gfxCtx->overlayBuffer);
+        }
+    } else {
+        gSPBranchList(POLY_XLU_DISP++, gfxCtx->overlayBuffer);
+    }
     gDPPipeSync(OVERLAY_DISP++);
     gDPFullSync(OVERLAY_DISP++);
     gSPEndDisplayList(OVERLAY_DISP++);
@@ -383,13 +454,42 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
         osSyncPrintf(VT_COL(RED, WHITE) "ゼルダ4は死んでしまった(graph_alloc is empty)\n" VT_RST);
     }
 
+    // SOH [VR] The arena checks above are silent here (game prints are compiled out) and a crashed
+    // arena has already written out of bounds by the time it's detected. The world-space pause menu
+    // puts the whole frozen world AND the whole kaleido into polyOpa in the same frame, which
+    // vanilla never does, so report overflows, and the tightest headroom seen during each such pause.
+    {
+        static s32 sVrPauseMinFree = 0x7FFFFFFF;
+        static s32 sVrPauseWasWorldSpace = false;
+        s32 vrPauseWorldSpace = VrPause_WorldSpace();
+        s32 opaFree = THGA_GetSize(&gfxCtx->polyOpa);
+
+        if (problem) {
+            lusprintf(__FILE__, __LINE__, 4,
+                      "[VR] gfx arena overflow, frame dropped: polyOpa free %d of %d, polyXlu free %d of %d, "
+                      "overlay free %d of %d (world-space pause %d)",
+                      opaFree, (s32)gfxCtx->polyOpa.size, THGA_GetSize(&gfxCtx->polyXlu), (s32)gfxCtx->polyXlu.size,
+                      THGA_GetSize(&gfxCtx->overlay), (s32)gfxCtx->overlay.size, vrPauseWorldSpace);
+        }
+        if (vrPauseWorldSpace) {
+            if (opaFree < sVrPauseMinFree) {
+                sVrPauseMinFree = opaFree;
+            }
+        } else if (sVrPauseWasWorldSpace) {
+            lusprintf(__FILE__, __LINE__, 2, "[VR] world-space pause: polyOpa min free %d of %d bytes",
+                      sVrPauseMinFree, (s32)gfxCtx->polyOpa.size);
+            sVrPauseMinFree = 0x7FFFFFFF;
+        }
+        sVrPauseWasWorldSpace = vrPauseWorldSpace;
+    }
+
     if (!problem) {
         Graph_TaskSet00(gfxCtx);
         gfxCtx->gfxPoolIdx++;
         gfxCtx->fbIdx++;
     }
 
-    func_800F3054();
+    Audio_Update();
 
     {
         OSTime time = osGetTime();
@@ -408,9 +508,11 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
         sGraphUpdateTime = time;
     }
 
+    s32 mask = CVarGetInteger("gDeveloperTools.MapSelectBtn", BTN_Z | BTN_L | BTN_R);
+
     if (CVarGetInteger(CVAR_DEVELOPER_TOOLS("DebugEnabled"), 0)) {
-        if (CHECK_BTN_ALL(gameState->input[0].press.button, BTN_Z) &&
-            CHECK_BTN_ALL(gameState->input[0].cur.button, BTN_L | BTN_R)) {
+        if (CHECK_BTN_ANY(gameState->input[0].press.button, mask) &&
+            CHECK_BTN_ALL(gameState->input[0].cur.button, mask)) {
             gSaveContext.gameMode = GAMEMODE_NORMAL;
             SET_NEXT_GAMESTATE(gameState, Select_Init, SelectContext);
             gameState->running = false;

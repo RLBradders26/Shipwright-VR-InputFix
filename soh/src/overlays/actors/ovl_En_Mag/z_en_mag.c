@@ -5,6 +5,7 @@
  */
 
 #include "z_en_mag.h"
+#include <fast/vr_benchmark.h>
 #include "objects/object_mag/object_mag.h"
 #include <soh/GameVersions.h>
 #include "soh/ResourceManagerHelpers.h"
@@ -62,6 +63,8 @@ static s16 sDelayTimer = 0;
 void EnMag_Init(Actor* thisx, PlayState* play) {
     EnMag* this = (EnMag*)thisx;
     bool isMQ = ResourceMgr_IsGameMasterQuest();
+
+    vr_benchmark_title_intro_begin();
 
     YREG(1) = 63;
     YREG(3) = 80;
@@ -323,6 +326,7 @@ void EnMag_Update(Actor* thisx, PlayState* play) {
         }
     } else if (this->globalState == MAG_STATE_DISPLAY) {
         if (Flags_GetEnv(play, 4)) {
+            vr_benchmark_title_intro_end();
             this->globalState = MAG_STATE_FADE_OUT;
         }
     }
@@ -482,10 +486,20 @@ bool EnMag_ShouldDrawPressStart(Font* font, Gfx** gfxP, bool isActualText) {
 // #endregion
 
 // Title logo is shifted to the left in Master Quest
-#define LOGO_X_SHIFT (isMQ ? 0 : -8)
+#define LOGO_X_SHIFT (isMQ ? -8 : 0)
+#define TITLE_X_SHIFT (isMQ ? -32 : 0)
 #define LOGO_TEX (isMQ ? gTitleZeldaShieldLogoMQTex : gTitleZeldaShieldLogoTex)
+// Copyright texture is different depending on the version
+// JPN CE displays two slightly different 2004 copyrights when lang is jpn or not
+// Otherwise the other GC JPN versions either display 2002 for JPN or 2003 for others
+// Else fallback to 2003 for GC or 1998 for N64
+#define COPYRIGHT_TEX                                                                                              \
+    (isJpnGC_CE                                                                                                    \
+         ? (gSaveContext.language == LANGUAGE_JPN ? gTitleCopyright19982004JpnTex : gTitleCopyright19982004EngTex) \
+         : (isGC ? ((isJpnGC_notCE || gSaveContext.language == LANGUAGE_JPN) ? gTitleCopyright19982002Tex          \
+                                                                             : gTitleCopyright19982003Tex)         \
+                 : gTitleCopyright1998Tex))
 // Copyright texture is larger on GC
-#define COPYRIGHT_TEX (isGC ? gTitleCopyright19982003Tex : gTitleCopyright1998Tex)
 #define COPYRIGHT_TEX_WIDTH (isGC ? 160 : 128)
 #define COPYRIGHT_TEX_LEFT (isGC ? 78 : 94)
 
@@ -515,6 +529,9 @@ void EnMag_DrawInner(Actor* thisx, PlayState* play, Gfx** gfxP) {
     u16 rectTop;
     bool isMQ = ResourceMgr_IsGameMasterQuest();
     bool isGC = ResourceMgr_GetGamePlatform(0) == GAME_PLATFORM_GC;
+    bool isJpnGC_CE = isGC && ResourceMgr_GetGameVersion(0) == OOT_NTSC_JP_GC_CE;
+    bool isJpnGC_notCE =
+        isGC && (ResourceMgr_GetGameVersion(0) == OOT_NTSC_JP_GC || ResourceMgr_GetGameVersion(0) == OOT_NTSC_JP_MQ);
 
     gSPSegment(gfx++, 0x06, play->objectCtx.status[this->actor.objBankIndex].segment);
 
@@ -625,8 +642,8 @@ void EnMag_DrawInner(Actor* thisx, PlayState* play, Gfx** gfxP) {
                               G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, 5, 5, 2, 1);
             gDPSetTileSize(gfx++, 1, this->unk_E30C & 0x7F, this->effectScroll & 0x7F,
                            (this->unk_E30C & 0x7F) + ((32 - 1) << 2), (this->effectScroll & 0x7F) + ((32 - 1) << 2));
-            gSPTextureRectangle(gfx++, 106 << 2, 144 << 2, (106 + 128) << 2, (144 + 16) << 2, G_TX_RENDERTILE, 0, 0,
-                                1 << 10, 1 << 10);
+            gSPTextureRectangle(gfx++, 424 + TITLE_X_SHIFT, 576, 424 + TITLE_X_SHIFT + 512, 576 + 64, G_TX_RENDERTILE,
+                                0, 0, 1 << 10, 1 << 10);
         }
     }
 

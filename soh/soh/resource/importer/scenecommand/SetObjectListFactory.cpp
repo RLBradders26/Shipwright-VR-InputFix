@@ -2,6 +2,7 @@
 #include "soh/resource/type/scenecommand/SetObjectList.h"
 #include "soh/resource/logging/SceneCommandLoggers.h"
 #include "spdlog/spdlog.h"
+#include <tinyxml2.h>
 
 namespace SOH {
 std::shared_ptr<Ship::IResource> SetObjectListFactory::ReadResource(std::shared_ptr<Ship::ResourceInitData> initData,
@@ -40,7 +41,7 @@ std::shared_ptr<Ship::IResource> SetObjectListFactoryXML::ReadResource(std::shar
         child = child->NextSiblingElement();
     }
 
-    setObjectList->numObjects = setObjectList->objects.size();
+    setObjectList->numObjects = static_cast<u32>(setObjectList->objects.size());
 
     return setObjectList;
 }

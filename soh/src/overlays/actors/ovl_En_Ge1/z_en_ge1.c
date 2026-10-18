@@ -8,7 +8,6 @@
 #include "vt.h"
 #include "objects/object_ge1/object_ge1.h"
 #include "soh/Enhancements/randomizer/randomizer_entrance.h"
-#include "soh/OTRGlobals.h"
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
@@ -96,22 +95,6 @@ static void* sEyeTextures[] = {
 void EnGe1_Init(Actor* thisx, PlayState* play) {
     s32 pad;
     EnGe1* this = (EnGe1*)thisx;
-
-    // When spawning the gate operator, also spawn an extra gate operator on the wasteland side
-    if (IS_RANDO &&
-        (Randomizer_GetSettingValue(RSK_SHUFFLE_GERUDO_MEMBERSHIP_CARD) ||
-         Randomizer_GetSettingValue(RSK_SHUFFLE_OVERWORLD_ENTRANCES)) &&
-        (this->actor.params & 0xFF) == GE1_TYPE_GATE_OPERATOR) {
-        // Spawn the extra gaurd with params matching the custom type added (0x0300 + 0x02)
-        Actor_Spawn(&play->actorCtx, play, ACTOR_EN_GE1, -1358.0f, 88.0f, -3018.0f, 0, 0x95B0, 0,
-                    0x0300 | GE1_TYPE_EXTRA_GATE_OPERATOR, true);
-    }
-
-    // Convert the "extra" gate operator into a normal one so it matches the same params
-    if ((this->actor.params & 0xFF) == GE1_TYPE_EXTRA_GATE_OPERATOR) {
-        this->actor.params &= ~0xFF;
-        this->actor.params |= GE1_TYPE_GATE_OPERATOR;
-    }
 
     ActorShape_Init(&this->actor.shape, 0.0f, ActorShadow_DrawCircle, 30.0f);
     SkelAnime_InitFlex(play, &this->skelAnime, &gGerudoWhiteSkel, &gGerudoWhiteIdleAnim, this->jointTable,
@@ -221,7 +204,7 @@ s32 EnGe1_SetTalkAction(EnGe1* this, PlayState* play, u16 textId, f32 arg3, EnGe
     this->actor.textId = textId;
 
     if (this->actor.xzDistToPlayer < arg3) {
-        func_8002F2CC(&this->actor, play, arg3);
+        Actor_OfferTalk(&this->actor, play, arg3);
     }
 
     return false;
@@ -251,7 +234,7 @@ void EnGe1_KickPlayer(EnGe1* this, PlayState* play) {
     if (this->cutsceneTimer > 0) {
         this->cutsceneTimer--;
     } else {
-        func_8006D074(play);
+        Horse_ResetHorseData(play);
 
         if ((INV_CONTENT(ITEM_HOOKSHOT) == ITEM_NONE) || (INV_CONTENT(ITEM_LONGSHOT) == ITEM_NONE)) {
             play->nextEntranceIndex = ENTR_GERUDO_VALLEY_1;
@@ -263,7 +246,7 @@ void EnGe1_KickPlayer(EnGe1* this, PlayState* play) {
         }
 
         if (IS_RANDO) {
-            Entrance_OverrideGeurdoGuardCapture();
+            Entrance_OverrideGerudoGuardCapture();
         }
 
         play->transitionType = TRANS_TYPE_CIRCLE(TCA_STARBURST, TCC_BLACK, TCS_FAST);
@@ -589,7 +572,7 @@ void EnGe1_TalkWinPrize_Archery(EnGe1* this, PlayState* play) {
         this->actionFunc = EnGe1_BeginGiveItem_Archery;
         this->actor.flags &= ~ACTOR_FLAG_TALK_OFFER_AUTO_ACCEPTED;
     } else {
-        func_8002F2CC(&this->actor, play, 200.0f);
+        Actor_OfferTalk(&this->actor, play, 200.0f);
     }
 }
 
@@ -616,7 +599,7 @@ void EnGe1_BeginGame_Archery(EnGe1* this, PlayState* play) {
                 if (gSaveContext.rupees < 20) {
                     Message_ContinueTextbox(play, 0x85);
                     this->actionFunc = EnGe1_TalkTooPoor_Archery;
-                } else {
+                } else if (GameInteractor_Should(VB_PLAY_HORSEBACK_ARCHERY, true, this, play)) {
                     Rupees_ChangeBy(-20);
                     play->nextEntranceIndex = ENTR_GERUDOS_FORTRESS_EAST_EXIT;
                     gSaveContext.nextCutsceneIndex = 0xFFF0;
@@ -659,7 +642,7 @@ void EnGe1_TalkNoPrize_Archery(EnGe1* this, PlayState* play) {
     if (Actor_ProcessTalkRequest(&this->actor, play)) {
         this->actionFunc = EnGe1_TalkOfferPlay_Archery;
     } else {
-        func_8002F2CC(&this->actor, play, 300.0f);
+        Actor_OfferTalk(&this->actor, play, 300.0f);
     }
 }
 
@@ -730,7 +713,7 @@ void EnGe1_TurnToFacePlayer(EnGe1* this, PlayState* play) {
     if (ABS(angleDiff) <= 0x4000) {
         Math_SmoothStepToS(&this->actor.shape.rot.y, this->actor.yawTowardsPlayer, 6, 4000, 100);
         this->actor.world.rot.y = this->actor.shape.rot.y;
-        func_80038290(play, &this->actor, &this->headRot, &this->unk_2A2, this->actor.focus.pos);
+        Actor_TrackPlayer(play, &this->actor, &this->headRot, &this->unk_2A2, this->actor.focus.pos);
     } else {
         if (angleDiff < 0) {
             Math_SmoothStepToS(&this->headRot.y, -0x2000, 6, 6200, 0x100);
@@ -747,7 +730,7 @@ void EnGe1_LookAtPlayer(EnGe1* this, PlayState* play) {
     s16 angleDiff = this->actor.yawTowardsPlayer - this->actor.shape.rot.y;
 
     if ((ABS(angleDiff) <= 0x4300) && (this->actor.xzDistToPlayer < 100.0f)) {
-        func_80038290(play, &this->actor, &this->headRot, &this->unk_2A2, this->actor.focus.pos);
+        Actor_TrackPlayer(play, &this->actor, &this->headRot, &this->unk_2A2, this->actor.focus.pos);
     } else {
         Math_SmoothStepToS(&this->headRot.x, 0, 6, 6200, 100);
         Math_SmoothStepToS(&this->headRot.y, 0, 6, 6200, 100);

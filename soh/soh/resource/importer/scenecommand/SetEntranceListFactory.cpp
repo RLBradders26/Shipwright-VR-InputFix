@@ -2,6 +2,7 @@
 #include "soh/resource/type/scenecommand/SetEntranceList.h"
 #include "soh/resource/logging/SceneCommandLoggers.h"
 #include "spdlog/spdlog.h"
+#include <tinyxml2.h>
 
 namespace SOH {
 std::shared_ptr<Ship::IResource> SetEntranceListFactory::ReadResource(std::shared_ptr<Ship::ResourceInitData> initData,
@@ -49,7 +50,7 @@ SetEntranceListFactoryXML::ReadResource(std::shared_ptr<Ship::ResourceInitData> 
         child = child->NextSiblingElement();
     }
 
-    setEntranceList->numEntrances = setEntranceList->entrances.size();
+    setEntranceList->numEntrances = static_cast<u32>(setEntranceList->entrances.size());
 
     return setEntranceList;
 }

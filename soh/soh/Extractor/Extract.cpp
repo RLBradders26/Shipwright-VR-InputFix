@@ -5,11 +5,21 @@
 #pragma comment(lib, "Shlwapi.lib")
 #endif
 #include "Extract.h"
+#ifndef __ANDROID__
 #include "portable-file-dialogs.h"
-#include <utils/binarytools/BitConverter.h>
+#endif
+#include <ship/utils/binarytools/BitConverter.h>
+#include "soh/ShipUtils.h"
 #include "variables.h"
 
-#ifdef unix
+#ifdef __ANDROID__
+#include <SDL2/SDL_rwops.h>
+#include <SDL2/SDL_system.h>
+#include <spdlog/spdlog.h>
+#include <zip.h>
+#endif
+
+#if defined(unix) && !defined(__ANDROID__)
 #include <dirent.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -46,7 +56,6 @@
 #include <fstream>
 #include <filesystem>
 #include <unordered_map>
-#include <random>
 #include <string>
 
 extern "C" uint32_t CRC32C(unsigned char* data, size_t dataSize);
@@ -109,9 +118,20 @@ enum class ButtonId : int {
     FIND,
 };
 
+static std::string sLastErrorText;
+
+std::string Extractor::LastErrorText() {
+    return sLastErrorText;
+}
+
 void Extractor::ShowErrorBox(const char* title, const char* text) {
+    sLastErrorText = std::string(title) + ": " + text;
 #ifdef _WIN32
     MessageBoxA(nullptr, text, title, MB_OK | MB_ICONERROR);
+#elif defined(__ANDROID__)
+    // SOH [VR] SDL's Android message box is a Java dialog: invisible over the VR session, and it
+    // blocks this thread until dismissed. Log it; the setup panel shows LastErrorText().
+    SPDLOG_ERROR("[Extractor] {}: {}", title, text);
 #else
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title, text, nullptr);
 #endif
@@ -136,6 +156,12 @@ void Extractor::ShowCompressedErrorBox() const {
 }
 
 int Extractor::ShowRomPickBox(uint32_t verCrc) const {
+#ifdef __ANDROID__
+    // SOH [VR] No dialogs under VR (see ShowErrorBox): the ROM in the data folder was the player's
+    // explicit pick in SetupActivity.
+    (void)verCrc;
+    return (int)ButtonId::YES;
+#endif
     std::unique_ptr<char[]> boxBuffer = std::make_unique<char[]>(mCurrentRomPath.size() + 100);
     SDL_MessageBoxData boxData = { 0 };
     SDL_MessageBoxButtonData buttons[3] = { { 0 } };
@@ -168,6 +194,10 @@ int Extractor::ShowYesNoBox(const char* title, const char* box) {
     int ret;
 #ifdef _WIN32
     ret = MessageBoxA(nullptr, box, title, MB_YESNO | MB_ICONQUESTION);
+#elif defined(__ANDROID__)
+    // SOH [VR] No dialogs under VR (see ShowErrorBox).
+    SPDLOG_WARN("[Extractor] '{}' ({}) answered No: no dialogs in the headset", title, box);
+    ret = IDNO;
 #else
     SDL_MessageBoxData boxData = { 0 };
     SDL_MessageBoxButtonData buttons[2] = { { 0 } };
@@ -229,7 +259,8 @@ void Extractor::FilterRoms(std::vector<std::string>& roms, RomSearchMode searchM
 void Extractor::GetRoms(std::vector<std::string>& roms) {
 #ifdef _WIN32
     WIN32_FIND_DATAA ffd;
-    HANDLE h = FindFirstFileA(".\\*", &ffd);
+    std::string search = std::string(mSearchPath + "\\*");
+    HANDLE h = FindFirstFileA(search.c_str(), &ffd);
 
     do {
         if (!(ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
@@ -237,13 +268,13 @@ void Extractor::GetRoms(std::vector<std::string>& roms) {
 
             // Check for any standard N64 rom file extensions.
             if ((strcmp(ext, ".z64") == 0) || (strcmp(ext, ".n64") == 0) || (strcmp(ext, ".v64") == 0))
-                roms.push_back(ffd.cFileName);
+                roms.push_back(mSearchPath + "\\" + ffd.cFileName);
         }
     } while (FindNextFileA(h, &ffd) != 0);
     // if (h != nullptr) {
     //    CloseHandle(h);
     //}
-#elif unix
+#elif defined(unix) && !defined(__ANDROID__)
     // Open the directory of the app.
     DIR* d = opendir(mSearchPath.c_str());
     struct dirent* dir;
@@ -316,6 +347,10 @@ bool Extractor::GetRomPathFromBox() {
         return false;
     }
     mCurrentRomPath = nameBuffer;
+#elif defined(__ANDROID__)
+    // SOH [VR] No native picker under a VR session: SetupActivity imports the ROM before the game
+    // starts (Android/app/src/main/java/com/shipwrightvr/soh/SetupActivity.java).
+    return false;
 #else
     auto selection = pfd::open_file("Select a file", mSearchPath, { "N64 Roms", "*.z64 *.n64 *.v64" }).result();
 
@@ -401,7 +436,6 @@ bool Extractor::ManuallySearchForRom() {
     std::ifstream inFile;
 
     if (!GetRomPathFromBox()) {
-        ShowErrorBox("No rom selected", "No Rom selected. Exiting");
         return false;
     }
 
@@ -453,11 +487,43 @@ bool Extractor::ManuallySearchForRomMatchingType(RomSearchMode searchMode) {
     return true;
 }
 
+bool Extractor::RunFileStandalone(std::string rom) {
+    if (std::filesystem::is_directory(rom)) {
+        return false;
+    }
+    auto file = std::filesystem::path(rom);
+    if ((file.extension() != ".n64") && (file.extension() != ".z64") && (file.extension() != ".v64")) {
+        return false;
+    }
+    SetRomInfo(rom);
+
+    if (!ValidateRomSize()) {
+        return false;
+    }
+    std::ifstream inFile;
+
+    inFile.open(rom, std::ios::in | std::ios::binary);
+    inFile.read((char*)mRomData.get(), mCurRomSize);
+    inFile.clear();
+    inFile.close();
+    BitConverter::RomToBigEndian(mRomData.get(), mCurRomSize);
+
+    if (!ValidateRom(true)) {
+        return false;
+    }
+
+    return true;
+}
+
+void Extractor::SetSearchPath(const std::string& path) {
+    mSearchPath = path;
+}
+
 bool Extractor::Run(std::string searchPath, RomSearchMode searchMode) {
     std::vector<std::string> roms;
     std::ifstream inFile;
 
-    mSearchPath = searchPath;
+    SetSearchPath(searchPath);
 
     GetRoms(roms);
     FilterRoms(roms, searchMode);
@@ -587,17 +653,20 @@ const char* Extractor::GetZapdVerStr() const {
 }
 
 std::string Extractor::Mkdtemp() {
+#ifdef __ANDROID__
+    // No /tmp on Android; the app's internal storage (ext4, unlike the shared external folder).
+    std::string temp_dir = std::string(SDL_AndroidGetInternalStoragePath()) + "/tmp";
+    std::filesystem::create_directories(temp_dir);
+#else
     std::string temp_dir = std::filesystem::temp_directory_path().string();
+#endif
 
     // create 6 random alphanumeric characters
     static const char charset[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dist(0, sizeof(charset) - 1);
 
     char randchr[7];
     for (int i = 0; i < 6; i++) {
-        randchr[i] = charset[dist(gen)];
+        randchr[i] = charset[ShipUtils::Random(0, sizeof(charset))];
     }
     randchr[6] = '\0';
 
@@ -606,16 +675,87 @@ std::string Extractor::Mkdtemp() {
     return tmppath;
 }
 
-extern "C" int zapd_main(int argc, char** argv);
+extern "C" int zapd_report(int argc, char** argv, std::atomic<size_t>* extractCount, std::atomic<size_t>* totalExtract);
+static void MessageboxWorker();
 
-bool Extractor::CallZapd(std::string installPath, std::string exportdir) {
-    constexpr int argc = 18;
+#ifdef __ANDROID__
+// SOH [VR] The APK carries soh/assets/extractor + soh/assets/xml as extractor.zip (built by
+// Android/app/build.gradle, entries under assets/). Unpack it into the extraction's temp folder,
+// which CallZapd deletes afterwards, so the ~7.7k XMLs never linger on the device.
+static bool UnpackApkExtractorAssets(const std::string& dir) {
+    SDL_RWops* rw = SDL_RWFromFile("extractor.zip", "rb"); // relative = APK assets on Android
+    if (rw == nullptr) {
+        SPDLOG_ERROR("[Extractor] extractor.zip not in the APK: {}", SDL_GetError());
+        return false;
+    }
+    const Sint64 size = SDL_RWsize(rw);
+    std::vector<uint8_t> data(size > 0 ? (size_t)size : 0);
+    const size_t got = data.empty() ? 0 : SDL_RWread(rw, data.data(), 1, data.size());
+    SDL_RWclose(rw);
+    if (data.empty() || got != data.size()) {
+        SPDLOG_ERROR("[Extractor] Reading extractor.zip failed ({} of {} bytes)", got, size);
+        return false;
+    }
+
+    zip_error_t err;
+    zip_error_init(&err);
+    zip_source_t* src = zip_source_buffer_create(data.data(), data.size(), 0, &err);
+    zip_t* archive = src != nullptr ? zip_open_from_source(src, ZIP_RDONLY, &err) : nullptr;
+    if (archive == nullptr) {
+        SPDLOG_ERROR("[Extractor] Opening extractor.zip failed: {}", zip_error_strerror(&err));
+        if (src != nullptr) {
+            zip_source_free(src);
+        }
+        zip_error_fini(&err);
+        return false;
+    }
+    zip_error_fini(&err);
+
+    bool ok = true;
+    std::vector<char> buf(1 << 16);
+    const zip_int64_t count = zip_get_num_entries(archive, 0);
+    for (zip_int64_t i = 0; i < count && ok; i++) {
+        zip_stat_t st;
+        if (zip_stat_index(archive, (zip_uint64_t)i, 0, &st) != 0 || st.name == nullptr) {
+            continue;
+        }
+        const std::string name = st.name;
+        const std::filesystem::path out = std::filesystem::path(dir) / name;
+        if (!name.empty() && name.back() == '/') {
+            std::filesystem::create_directories(out);
+            continue;
+        }
+        std::filesystem::create_directories(out.parent_path());
+        zip_file_t* zf = zip_fopen_index(archive, (zip_uint64_t)i, 0);
+        std::ofstream file(out, std::ios::binary);
+        if (zf == nullptr || !file) {
+            SPDLOG_ERROR("[Extractor] Unpacking {} failed", name);
+            ok = false;
+        } else {
+            zip_int64_t n;
+            while ((n = zip_fread(zf, buf.data(), buf.size())) > 0) {
+                file.write(buf.data(), n);
+            }
+        }
+        if (zf != nullptr) {
+            zip_fclose(zf);
+        }
+    }
+    zip_close(archive); // also frees the buffer source (not the vector it points into)
+    std::filesystem::create_directories(std::filesystem::path(dir) / "assets" / "symbols");
+    return ok;
+}
+#endif
+
+bool Extractor::CallZapd(std::string installPath, std::string exportdir, std::atomic<size_t>* extractCount,
+                         std::atomic<size_t>* totalExtract) {
+    constexpr int argc = 22;
     char xmlPath[1024];
     char confPath[1024];
     char portVersion[18]; // 5 digits for int16_max (x3) + separators + terminator
     std::array<const char*, argc> argv;
     const char* version = GetZapdVerStr();
-    const char* otrFile = IsMasterQuest() ? "oot-mq.otr" : "oot.otr";
+    const char* otrFile = IsMasterQuest() ? "oot-mq.o2r" : "oot.o2r";
 
     std::string romPath = std::filesystem::absolute(mCurrentRomPath).string();
     installPath = std::filesystem::absolute(installPath).string();
@@ -626,14 +766,20 @@ bool Extractor::CallZapd(std::string installPath, std::string exportdir) {
 #ifdef _WIN32
     std::filesystem::copy(installPath + "/assets", tempdir + "/assets",
                           std::filesystem::copy_options::recursive | std::filesystem::copy_options::update_existing);
+#elif defined(__ANDROID__)
+    if (!UnpackApkExtractorAssets(tempdir)) {
+        std::filesystem::remove_all(tempdir);
+        ShowErrorBox("Extractor assets missing", "The app's extractor files couldn't be unpacked. Reinstall the app.");
+        return false;
+    }
 #else
     std::filesystem::create_symlink(installPath + "/assets", tempdir + "/assets");
 #endif
 
     std::filesystem::current_path(tempdir);
 
-    snprintf(xmlPath, 1024, "assets/extractor/xmls/%s", version);
-    snprintf(confPath, 1024, "assets/extractor/Config_%s.xml", version);
+    snprintf(xmlPath, 1024, "assets/xml/%s", version);
+    snprintf(confPath, 1024, "assets/Config_%s.xml", version);
     snprintf(portVersion, 18, "%d.%d.%d", gBuildVersionMajor, gBuildVersionMinor, gBuildVersionPatch);
 
     argv[0] = "ZAPD";
@@ -643,9 +789,9 @@ bool Extractor::CallZapd(std::string installPath, std::string exportdir) {
     argv[4] = "-b";
     argv[5] = romPath.c_str();
     argv[6] = "-fl";
-    argv[7] = "assets/extractor/filelists";
+    argv[7] = "assets/filelists";
     argv[8] = "-gsf";
-    argv[9] = "1";
+    argv[9] = "0";
     argv[10] = "-rconf";
     argv[11] = confPath;
     argv[12] = "-se";
@@ -654,29 +800,12 @@ bool Extractor::CallZapd(std::string installPath, std::string exportdir) {
     argv[15] = otrFile;
     argv[16] = "--portVer";
     argv[17] = portVersion;
+    argv[18] = "-o";
+    argv[19] = "placeholder";
+    argv[20] = "-osf";
+    argv[21] = "placeholder";
 
-#ifdef _WIN32
-    // Grab a handle to the command window.
-    HWND cmdWindow = GetConsoleWindow();
-
-    // Normally the command window is hidden. We want the window to be shown here so the user can see the progess of the
-    // extraction.
-    ShowWindow(cmdWindow, SW_SHOW);
-    SetWindowPos(cmdWindow, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);
-#else
-    // Show extraction in background message until linux/mac can have visual progress
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Extracting",
-                             "Extraction will now begin in the background.\n\nPlease be patient for the process to "
-                             "finish. Do not close the main program.",
-                             nullptr);
-#endif
-
-    zapd_main(argc, (char**)argv.data());
-
-#ifdef _WIN32
-    // Hide the command window again.
-    ShowWindow(cmdWindow, SW_HIDE);
-#endif
+    zapd_report(argc, (char**)argv.data(), extractCount, totalExtract);
 
     std::filesystem::copy(otrFile, exportdir + "/" + otrFile, std::filesystem::copy_options::overwrite_existing);
 
@@ -684,5 +813,12 @@ bool Extractor::CallZapd(std::string installPath, std::string exportdir) {
     std::filesystem::current_path(curdir);
     std::filesystem::remove_all(tempdir);
 
-    return 0;
+    return false;
+}
+
+static void MessageboxWorker() {
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Extracting",
+                             "Extraction will now begin in the background.\n\nPlease be patient for the process to "
+                             "finish. Do not close the main program.",
+                             nullptr);
 }

@@ -31,7 +31,7 @@ void func_800A9F6C(f32 a, u8 b, u8 c, u8 d) {
     }
 }
 
-void func_800AA000(f32 a, u8 b, u8 c, u8 d) {
+void Rumble_Request(f32 a, u8 b, u8 c, u8 d) {
     s32 temp1;
     s32 temp2;
     s32 i;
@@ -84,7 +84,7 @@ void func_800AA15C(void) {
     D_80160FD0.unk_104 = 2;
 }
 
-void func_800AA16C(void) {
+void Rumble_ClearRequests(void) {
     D_80160FD0.unk_104 = 0;
 }
 

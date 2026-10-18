@@ -3,8 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 #include "z64.h"
-#include "OTRGlobals.h"
-//#include <math.h>
 
 u32 osResetType;
 u32 osTvType = OS_TV_NTSC;
@@ -30,6 +28,12 @@ u16 D_0F000000[SCREEN_WIDTH * SCREEN_HEIGHT];
 u8 osAppNmiBuffer[2048];
 
 f32 qNaN0x10000 = 0x7F810000;
+
+// disable "must return a value" warnings
+// TODO: Actually fix all of this
+#if _MSC_VER
+#pragma warning(disable : 4716)
+#endif
 
 // void gSPTextureRectangle(Gfx* pkt, s32 xl, s32 yl, s32 xh, s32 yh, u32 tile, u32 s, s32 t, u32 dsdx, u32 dtdy)
 //{
@@ -145,7 +149,47 @@ void Audio_osWritebackDCache(void* mem, s32 size) {
 }
 
 s32 osAiSetFrequency(u32 freq) {
-    return 1;
+    // this is based off the math from the original method
+    /*
+
+    s32 osAiSetFrequency(u32 frequency) {
+        u8 bitrate;
+        f32 dacRateF = ((f32)osViClock / frequency) + 0.5f;
+        u32 dacRate = dacRateF;
+
+        if (dacRate < 132) {
+            return -1;
+        }
+
+        bitrate = (dacRate / 66);
+        if (bitrate > 16) {
+            bitrate = 16;
+        }
+
+        HW_REG(AI_DACRATE_REG, u32) = dacRate - 1;
+        HW_REG(AI_BITRATE_REG, u32) = bitrate - 1;
+        return osViClock / (s32)dacRate;
+    }
+
+    */
+
+    // bitrate is unused
+
+    // osViClock comes from
+    // #define VI_NTSC_CLOCK 48681812 /* Hz = 48.681812 MHz */
+    // s32 osViClock = VI_NTSC_CLOCK;
+
+    // frequency was originally 32000
+
+    // given all of that, dacRate is
+    // (u32)(((f32)48681812 / 32000) + 0.5f)
+    // which evaluates to 1521 (which is > 132)
+
+    // this leaves us with a final calculation of
+    // 48681812 / 1521
+    // which evaluates to 32006
+
+    return 32006;
 }
 
 void osInvalDCache(void* vaddr, s32 nbytes) {
@@ -191,7 +235,7 @@ s32 _Printf(PrintCallback a, void* arg, const char* fmt, va_list ap) {
     unsigned char buffer[4096];
 
     vsnprintf(buffer, sizeof(buffer), fmt, ap);
-    a(arg, buffer, strlen(buffer));
+    a(arg, buffer, (u32)strlen(buffer));
 }
 
 void osSpTaskLoad(OSTask* task) {

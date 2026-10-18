@@ -8,6 +8,8 @@
 #include "objects/gameplay_keep/gameplay_keep.h"
 #include "vt.h"
 #include "soh/ResourceManagerHelpers.h"
+#include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 #define FLAGS 0
 
@@ -170,6 +172,12 @@ s32 EnFish_InBottleRange(EnFish* this, PlayState* play) {
     s32 pad;
     Player* player = GET_PLAYER(play);
     Vec3f sp1C;
+
+    // SOH [VR] Physical scoop: the bottle mouth near the fish is reach enough (the offer
+    // itself is then measured at the mouth in Actor_OfferGetItem).
+    if (VrBottle_InReach(&this->actor)) {
+        return true;
+    }
 
     if (this->actor.xzDistToPlayer < 32.0f) {
         sp1C.x = (Math_SinS(this->actor.yawTowardsPlayer + 0x8000) * 16.0f) + player->actor.world.pos.x;
@@ -380,7 +388,7 @@ void EnFish_Dropped_Fall(EnFish* this, PlayState* play) {
     this->actor.shape.rot.z = this->actor.world.rot.z;
     SkelAnime_Update(&this->skelAnime);
 
-    if (this->actor.bgCheckFlags & 1) { // On floor
+    if (this->actor.bgCheckFlags & BGCHECKFLAG_GROUND) { // On floor
         this->timer = 400;
         EnFish_Dropped_SetupFlopOnGround(this);
     } else if (this->actor.bgCheckFlags & 0x20) { // In water
@@ -469,7 +477,7 @@ void EnFish_Dropped_FlopOnGround(EnFish* this, PlayState* play) {
         }
     } else if (this->actor.bgCheckFlags & 0x20) { // In water
         EnFish_Dropped_SetupSwimAway(this);
-    } else if (this->actor.bgCheckFlags & 1) { // On floor
+    } else if (this->actor.bgCheckFlags & BGCHECKFLAG_GROUND) { // On floor
         EnFish_Dropped_SetupFlopOnGround(this);
     }
 }
@@ -492,7 +500,7 @@ void EnFish_Dropped_SwimAway(EnFish* this, PlayState* play) {
     Math_SmoothStepToF(&this->actor.speedXZ, 2.8f, 0.1f, 0.4f, 0.0f);
 
     // If touching wall or not in water, turn back and slow down for one frame.
-    if ((this->actor.bgCheckFlags & 8) || !(this->actor.bgCheckFlags & 0x20)) {
+    if ((this->actor.bgCheckFlags & BGCHECKFLAG_WALL) || !(this->actor.bgCheckFlags & 0x20)) {
         this->actor.home.rot.y = Math_Vec3f_Yaw(&this->actor.world.pos, &this->actor.home.pos);
         this->actor.speedXZ *= 0.5f;
     }
@@ -504,7 +512,7 @@ void EnFish_Dropped_SwimAway(EnFish* this, PlayState* play) {
     this->actor.shape.rot = this->actor.world.rot;
 
     // Raise if on a floor.
-    if (this->actor.bgCheckFlags & 1) {
+    if (this->actor.bgCheckFlags & BGCHECKFLAG_GROUND) {
         Math_StepToF(&this->actor.world.pos.y, this->actor.home.pos.y - 4.0f, 2.0f);
     } else {
         Math_StepToF(&this->actor.world.pos.y, this->actor.home.pos.y - 10.0f, 2.0f);
@@ -679,7 +687,7 @@ void EnFish_UpdateCutscene(EnFish* this, PlayState* play) {
 // Update functions and Draw
 
 void EnFish_OrdinaryUpdate(EnFish* this, PlayState* play) {
-    if (this->timer > 0 && CVarGetInteger(CVAR_CHEAT("NoFishDespawn"), 0) == 0) {
+    if (GameInteractor_Should(VB_FISH_TIMER_TICK, this->timer > 0)) {
         this->timer--;
     }
 

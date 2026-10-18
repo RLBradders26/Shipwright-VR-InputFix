@@ -1,10 +1,16 @@
 [submodule "libultraship"]
 	path = libultraship
-	url = https://github.com/ShinyWindow/libultraship-vr.git
-	branch = vr-integration
+	url = https://github.com/RLBradders26/libultraship-vr.git
+	branch = submit/vr-input-remapping
 [submodule "ZAPDTR"]
 	path = ZAPDTR
 	url = https://github.com/harbourmasters/ZAPDTR
 [submodule "OTRExporter"]
 	path = OTRExporter
 	url = https://github.com/harbourmasters/OTRExporter
+[submodule "subprojects/wswrap"]
+	path = subprojects/wswrap
+	url = https://github.com/black-sliver/wswrap.git
+[submodule "subprojects/apclientpp"]
+	path = subprojects/apclientpp
+	url = https://github.com/black-sliver/apclientpp.git

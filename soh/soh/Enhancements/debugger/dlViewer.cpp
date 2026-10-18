@@ -1,23 +1,18 @@
-#include "actorViewer.h"
 #include "soh/util.h"
 #include "soh/SohGui/UIWidgets.hpp"
 #include "soh/SohGui/SohGui.hpp"
-#include "ResourceManager.h"
-#include "DisplayList.h"
+#include <libultraship/bridge/resourcebridge.h>
+#include <ship/resource/ResourceManager.h>
+#include <fast/resource/ResourceType.h>
+#include <fast/resource/type/DisplayList.h>
 #include "soh/OTRGlobals.h"
 
-#include <array>
-#include <bit>
 #include <map>
 #include <string>
-#include <libultraship/libultraship.h>
 #include "dlViewer.h"
 
 extern "C" {
 #include <z64.h>
-#include "z64math.h"
-#include "variables.h"
-#include "functions.h"
 #include "macros.h"
 }
 
@@ -66,7 +61,7 @@ std::map<int, std::string> cmdMap = {
 };
 
 void PerformDisplayListSearch() {
-    auto result = Ship::Context::GetInstance()->GetResourceManager()->GetArchiveManager()->ListFiles(
+    auto result = Ship::Context::GetRawInstance()->GetResourceManager()->GetArchiveManager()->ListFiles(
         "*" + std::string(searchString) + "*DL*");
 
     displayListSearchResults.clear();
@@ -89,6 +84,7 @@ void PerformDisplayListSearch() {
 }
 
 void DLViewerWindow::DrawElement() {
+    ImGui::BeginDisabled(CVarGetInteger(CVAR_SETTING("DisableChanges"), 0));
     // Debounce the search field as listing otr files is expensive
     UIWidgets::PushStyleInput(THEME_COLOR);
     ImGui::PushFont(OTRGlobals::Instance->fontMonoLarger);
@@ -122,15 +118,18 @@ void DLViewerWindow::DrawElement() {
 
     if (activeDisplayList == "") {
         ImGui::PopFont();
+        ImGui::EndDisabled();
         return;
     }
 
     try {
         auto res = std::static_pointer_cast<Fast::DisplayList>(
-            Ship::Context::GetInstance()->GetResourceManager()->LoadResource(activeDisplayList));
+            Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(activeDisplayList));
 
         if (res->GetInitData()->Type != static_cast<uint32_t>(Fast::ResourceType::DisplayList)) {
             ImGui::Text("Resource type is not a Display List. Please choose another.");
+            ImGui::PopFont();
+            ImGui::EndDisabled();
             return;
         }
 
@@ -139,7 +138,7 @@ void DLViewerWindow::DrawElement() {
         for (size_t i = 0; i < res->Instructions.size(); i++) {
             std::string id = "##CMD" + std::to_string(i);
             Gfx* gfx = (Gfx*)&res->Instructions[i];
-            int cmd = gfx->words.w0 >> 24;
+            int cmd = static_cast<int>(gfx->words.w0 >> 24);
             if (cmdMap.find(cmd) == cmdMap.end())
                 continue;
 
@@ -325,13 +324,10 @@ void DLViewerWindow::DrawElement() {
             }
             ImGui::EndGroup();
         }
-    } catch (const std::exception& e) {
-        ImGui::Text("Error displaying DL instructions.");
-        ImGui::PopFont();
-        return;
-    }
+    } catch ([[maybe_unused]] const std::exception& e) { ImGui::Text("Error displaying DL instructions."); }
 
     ImGui::PopFont();
+    ImGui::EndDisabled();
 }
 
 void DLViewerWindow::InitElement() {
