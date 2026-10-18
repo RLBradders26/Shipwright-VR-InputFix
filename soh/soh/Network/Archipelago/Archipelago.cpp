@@ -8,8 +8,17 @@
 #include "soh/Enhancements/custom-message/CustomMessageTypes.h"
 #include "soh/cvar_prefixes.h"
 #include "soh/util.h"
+// WebSocket++ templates narrow zlib buffer sizes internally. Keep that vendor warning
+// scoped to these headers; first-party code still builds with warnings as errors.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4267)
+#endif
 #include <apuuid.hpp>
 #include <apclient.hpp>
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 #include <fstream>
 #include <filesystem>
@@ -365,7 +374,7 @@ bool ArchipelagoClient::StartClient() {
                         if (receivedDamage >= 20) {
                             Player* player = GET_PLAYER(gPlayState);
                             // 80 received points is one full heart aka 16 health.
-                            gSaveContext.health -= floor(receivedDamage / 5);
+                            gSaveContext.health = static_cast<int16_t>(gSaveContext.health - receivedDamage / 5);
 
                             // Only use hit animations when the player is able to process it.
                             if (!(GameInteractor::IsGameplayPaused() || player->stateFlags2 & PLAYER_STATE2_CRAWLING ||
@@ -608,8 +617,8 @@ void ArchipelagoClient::InitForeignHints() {
             ApForeignHint foreignHint;
             foreignHint.playerId = hintLocation[0];
             foreignHint.locationId = hintLocation[1];
-            foreignHint.playerName = apClient->get_player_alias(foreignHint.playerId);
-            const std::string& game = apClient->get_player_game(foreignHint.playerId);
+            foreignHint.playerName = apClient->get_player_alias(static_cast<int>(foreignHint.playerId));
+            const std::string& game = apClient->get_player_game(static_cast<int>(foreignHint.playerId));
             foreignHint.locationName = apClient->get_location_name(foreignHint.locationId, game);
             foreignHint.groupName = get_random_group_from_location(foreignHint.locationName, game);
             foreignLocations.push_back(foreignHint);
@@ -983,7 +992,7 @@ void ArchipelagoClient::OpenForeignHint(RandomizerHint randomizerHintId) {
             foreignHint.locationName == Rando::StaticData::GetLocation(RC_LINKS_POCKET)->GetName()) {
             continue;
         }
-        apClient->CreateHints({ foreignHint.locationId }, foreignHint.playerId);
+        apClient->CreateHints({ foreignHint.locationId }, static_cast<int>(foreignHint.playerId));
     }
 }
 
